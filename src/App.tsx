@@ -1,6 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { getPostLoginRedirect, loginWithFrappe } from './frappeAuth'
+import {
+  getCurrentUserLabel,
+  isKeycloakAuthenticated,
+  loginWithKeycloak,
+  logoutFromKeycloak,
+} from './keycloakAuth'
+import { getFrappeSessionUser, loginWithFrappe, logoutFromFrappe } from './frappeAuth'
 import './style.css'
 
 type MenuKey = 'dashboard' | 'applications' | 'users'
@@ -11,6 +17,7 @@ type ApplicationCard = {
   usage: string
   status: 'active' | 'inactive'
   description: string
+  launchUrl?: string
 }
 
 type UserRow = {
@@ -29,6 +36,7 @@ const applications: ApplicationCard[] = [
     usage: 'HR Usage',
     status: 'active',
     description: 'Advanced predictive modeling and data visualization for supply chain management.',
+    launchUrl: import.meta.env.VITE_APP_HR_URL,
   },
   {
     id: 2,
@@ -36,6 +44,7 @@ const applications: ApplicationCard[] = [
     usage: 'Warehouse Usage',
     status: 'active',
     description: 'Manage inventory movement, stock health, and warehouse operations from one panel.',
+    launchUrl: import.meta.env.VITE_APP_WAREHOUSE_URL,
   },
   {
     id: 3,
@@ -43,6 +52,7 @@ const applications: ApplicationCard[] = [
     usage: 'Sales Usage',
     status: 'active',
     description: 'Track opportunities, customer conversion, and regional sales performance in real time.',
+    launchUrl: import.meta.env.VITE_APP_SALES_URL,
   },
   {
     id: 4,
@@ -57,6 +67,7 @@ const applications: ApplicationCard[] = [
     usage: 'Finance Usage',
     status: 'active',
     description: 'Control payables, receivables, approvals, and key financial indicators.',
+    launchUrl: import.meta.env.VITE_APP_FINANCE_URL,
   },
   {
     id: 6,
@@ -76,58 +87,97 @@ const users: UserRow[] = Array.from({ length: 10 }, (_, index) => ({
   locationRights: 'Dubai Gold Souk',
 }))
 
-const recentActivity = [
-  { role: 'Admin', message: 'You have a bug that needs to be fixed', time: 'Just now' },
-  { role: 'Admin', message: 'You have a bug that needs to be fixed', time: 'Just now' },
-  { role: 'Admin', message: 'New user registered', time: 'Just now' },
-  { role: 'User', message: 'New user registered', time: '12 hours ago' },
-]
-
 const DEFAULT_USERNAME = 'admin@example.com'
-const DEFAULT_PASSWORD = 'admin123'
+const DEFAULT_PASSWORD = ''
 
 function App() {
   const rememberedUser = useMemo(
     () => localStorage.getItem('kalyan_remember_usr') ?? '',
     [],
   )
-
   const [usr, setUsr] = useState(rememberedUser || DEFAULT_USERNAME)
   const [pwd, setPwd] = useState(DEFAULT_PASSWORD)
   const [rememberMe, setRememberMe] = useState(Boolean(rememberedUser))
+  const [isFrappeAuthenticated, setIsFrappeAuthenticated] = useState(false)
+  const [hasKeycloakSession, setHasKeycloakSession] = useState(isKeycloakAuthenticated())
+  const [checkingFrappeSession, setCheckingFrappeSession] = useState(true)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [activeMenu, setActiveMenu] = useState<MenuKey>('dashboard')
+  const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
   const [search, setSearch] = useState('')
 
-  const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
+  useEffect(() => {
+    let mounted = true
+
+    async function bootstrapFrappeSession() {
+      try {
+        const loggedInUser = await getFrappeSessionUser()
+        if (!mounted) {
+          return
+        }
+        setIsFrappeAuthenticated(Boolean(loggedInUser))
+      } catch {
+        if (!mounted) {
+          return
+        }
+        setIsFrappeAuthenticated(false)
+      } finally {
+        if (mounted) {
+          setCheckingFrappeSession(false)
+        }
+      }
+    }
+
+    void bootstrapFrappeSession()
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  const handleFrappeLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setError('')
     setLoading(true)
 
     try {
       await loginWithFrappe({ usr, pwd, rememberMe })
-      const redirectUrl = getPostLoginRedirect()
-      if (redirectUrl && redirectUrl !== '/') {
-        window.location.assign(redirectUrl)
-        return
-      }
-      setIsAuthenticated(true)
+      setIsFrappeAuthenticated(true)
     } catch (e) {
-      // Local demo fallback when backend credentials are not available.
-      if (usr === DEFAULT_USERNAME && pwd === DEFAULT_PASSWORD) {
-        setIsAuthenticated(true)
-        return
-      }
-      const message = e instanceof Error ? e.message : 'Login failed.'
+      const message = e instanceof Error ? e.message : 'Frappe login failed.'
       setError(message)
     } finally {
       setLoading(false)
     }
   }
 
-  if (isAuthenticated) {
+  const handleKeycloakLogin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setError('')
+    setLoading(true)
+
+    try {
+      await loginWithKeycloak()
+      setHasKeycloakSession(true)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Keycloak login failed.'
+      setError(message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const openApplication = (app: ApplicationCard) => {
+    if (!app.launchUrl || app.status !== 'active') {
+      return
+    }
+    window.open(app.launchUrl, '_blank', 'noopener,noreferrer')
+  }
+
+  const filteredApplications = applications.filter((app) =>
+    app.name.toLowerCase().includes(search.trim().toLowerCase()),
+  )
+
+  if (isFrappeAuthenticated && hasKeycloakSession) {
     return (
       <main className="portal-layout">
         <aside className="sidebar">
@@ -137,34 +187,72 @@ function App() {
             </div>
             <nav className="menu-list">
               <button
-                className={activeMenu === 'dashboard' ? 'active' : ''}
-                onClick={() => setActiveMenu('dashboard')}
-              >
-                Dashboard
-              </button>
-              <button
                 className={activeMenu === 'applications' ? 'active' : ''}
                 onClick={() => setActiveMenu('applications')}
               >
+                <img src="/ApplicationIcon.svg" alt="" className="menu-icon" />
                 My Applications
               </button>
               <button
                 className={activeMenu === 'users' ? 'active' : ''}
                 onClick={() => setActiveMenu('users')}
               >
+                <img src="/UserIcon.svg" alt="" className="menu-icon" />
                 Users
               </button>
             </nav>
           </div>
           <div className="sidebar-bottom">
-            <button className="ghost-btn">Settings</button>
+            <button className="ghost-btn">
+              <svg viewBox="0 0 24 24" className="menu-icon" aria-hidden="true">
+                <path
+                  d="M12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 0 0 0-7zm9 3.5l-2.02-.58a7.88 7.88 0 0 0-.57-1.36l1.1-1.79l-1.77-1.77l-1.79 1.1c-.43-.24-.88-.43-1.36-.57L14 3h-4l-.58 2.02c-.48.14-.93.33-1.36.57l-1.79-1.1L4.5 6.27l1.1 1.79c-.24.43-.43.88-.57 1.36L3 10v4l2.02.58c.14.48.33.93.57 1.36l-1.1 1.79l1.77 1.77l1.79-1.1c.43.24.88.43 1.36.57L10 21h4l.58-2.02c.48-.14.93-.33 1.36-.57l1.79 1.1l1.77-1.77l-1.1-1.79c.24-.43.43-.88.57-1.36L21 14v-4z"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              Settings
+            </button>
             <button
               className="ghost-btn logout"
-              onClick={() => {
-                setIsAuthenticated(false)
-                setActiveMenu('dashboard')
+              onClick={async () => {
+                setError('')
+                try {
+                  await logoutFromFrappe()
+                } catch {
+                  // Ignore logout API errors and continue local cleanup.
+                }
+                try {
+                  await logoutFromKeycloak()
+                } catch {
+                  // Ignore Keycloak redirect errors and continue local cleanup.
+                }
+                setHasKeycloakSession(false)
+                setIsFrappeAuthenticated(false)
+                setActiveMenu('applications')
               }}
             >
+              <svg viewBox="0 0 24 24" className="menu-icon" aria-hidden="true">
+                <path
+                  d="M15 7V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-2"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M10 12h11m-3-3l3 3l-3 3"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
               Logout
             </button>
           </div>
@@ -172,185 +260,88 @@ function App() {
 
         <section className="content-shell">
           <header className="topbar">
-            <p>
-              Dashboard /{' '}
-              {activeMenu === 'dashboard'
-                ? 'Overview'
-                : activeMenu === 'applications'
-                  ? 'Applications'
-                  : 'Users'}
-            </p>
+            <p>Dashboard / {activeMenu === 'applications' ? 'Applications' : 'Users'}</p>
             <div className="profile-mini">
-              <strong>Surendar V</strong>
-              <span>{usr || 'admin@kalyan.local'}</span>
+              <img src="/UserIcon.svg" alt="Profile" className="profile-avatar" />
+              <div className="profile-details">
+                <strong>Kalyan Admin</strong>
+                <span>{getCurrentUserLabel() || 'authenticated@kalyan.local'}</span>
+              </div>
             </div>
           </header>
-
-          {activeMenu === 'dashboard' ? (
-            <section className="view-wrap">
-              <h1>Welcome back,</h1>
-              <p className="view-subtitle">
-                Your enterprise ecosystem is performing optimally today.
-              </p>
-              <div className="stats-grid">
-                <article className="stat-card stat-one">
-                  <h3>149</h3>
-                  <p>Total Applications</p>
-                </article>
-                <article className="stat-card stat-two">
-                  <h3>149</h3>
-                  <p>Total Users</p>
-                </article>
-                <article className="stat-card stat-three">
-                  <h3>149</h3>
-                  <p>New User</p>
-                </article>
-                <article className="stat-card stat-four">
-                  <h3>80%</h3>
-                  <p>System Status</p>
-                </article>
-                <article className="stat-card stat-five">
-                  <h3>67</h3>
-                  <p>Active Applications</p>
-                </article>
-              </div>
-              <div className="dashboard-main-grid">
-                <div className="dashboard-left-column">
-                  <div className="chart-card">
-                    <div className="chart-header">
-                      <h4>Total Users</h4>
-                      <div className="chart-legend">
-                        <span className="legend-item black-dot">Current Week</span>
-                        <span className="legend-item blue-dot">Previous Week</span>
-                      </div>
-                    </div>
-                    <div className="chart-body">
-                      <div className="y-axis-labels">
-                        <span>30M</span>
-                        <span>20M</span>
-                        <span>10M</span>
-                        <span>0</span>
-                      </div>
-                      <div className="plot-area">
-                        <svg viewBox="0 0 780 330" className="activity-chart-svg">
-                          <line x1="0" y1="30" x2="780" y2="30" className="grid-line" />
-                          <line x1="0" y1="125" x2="780" y2="125" className="grid-line" />
-                          <line x1="0" y1="220" x2="780" y2="220" className="grid-line" />
-                          <line x1="0" y1="315" x2="780" y2="315" className="grid-line" />
-
-                          <path
-                            d="M 35 160 C 170 75, 285 55, 420 125 S 650 260, 755 85"
-                            className="blue-path"
-                          />
-                          <path
-                            d="M 35 140 C 175 235, 300 235, 430 148"
-                            className="black-path"
-                          />
-                          <path
-                            d="M 430 148 C 535 85, 640 58, 755 72"
-                            className="dotted-path"
-                          />
-
-                          <circle cx="285" cy="114" r="8" className="hover-point" />
-                        </svg>
-                        <div className="chart-tooltip">3,256,598</div>
-                        <div className="x-axis-months">
-                          <span>Jan</span>
-                          <span>Feb</span>
-                          <span>Mar</span>
-                          <span>Apr</span>
-                          <span>May</span>
-                          <span>Jun</span>
-                          <span>Jul</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="table-card">
-                    <h4>Recent Users</h4>
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Protal UID</th>
-                          <th>Name</th>
-                          <th>Status</th>
-                          <th>Primary Location</th>
-                          <th>Location Rights</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {users.slice(0, 4).map((item) => (
-                          <tr key={`recent-${item.id}`}>
-                            <td>{item.id}</td>
-                            <td>{item.name}</td>
-                            <td>
-                              <span className="pill green">{item.status}</span>
-                            </td>
-                            <td>{item.primaryLocation}</td>
-                            <td>{item.locationRights}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    <button className="view-more-btn" type="button">
-                      View More
-                    </button>
-                  </div>
-                </div>
-                <div className="dashboard-right-column">
-                  <div className="side-card">
-                    <h4>Quick Action</h4>
-                    <ul>
-                      <li>Hr Application</li>
-                      <li>Warehouse Management</li>
-                      <li>Sales Application</li>
-                      <li>Stock Management</li>
-                    </ul>
-                  </div>
-                  <div className="side-card">
-                    <h4>Recently Activity</h4>
-                    <div className="activity-list">
-                      {recentActivity.map((item, index) => (
-                        <div className="activity-item" key={`${item.role}-${index}`}>
-                          <strong>{item.role}</strong>
-                          <p>{item.message}</p>
-                          <span>{item.time}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </section>
-          ) : null}
 
           {activeMenu === 'applications' ? (
             <section className="view-wrap">
               <h1>Integrated Applications</h1>
               <p className="view-subtitle">
-                Curate and manage your enterprise application stack from one place.
+                Curate and manage your enterprise application stack. Monitor performance,
+                lifecycle status, and access controls from a centralized interface.
               </p>
               <div className="table-toolbar">
-                <h2>All Applications</h2>
-                <input
-                  placeholder="Search application"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                />
+                <h2>
+                  All Applications <span>({filteredApplications.length})</span>
+                </h2>
+                <div className="apps-controls">
+                  <input
+                    placeholder="Search application"
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                  <button type="button" className="icon-btn" aria-label="Search">
+                    🔍
+                  </button>
+                  <button type="button" className="icon-btn" aria-label="Filter">
+                    ⌕
+                  </button>
+                  <button type="button" className="sort-btn">
+                    Sort by
+                  </button>
+                </div>
               </div>
               <div className="apps-grid">
-                {applications
-                  .filter((app) =>
-                    app.name.toLowerCase().includes(search.trim().toLowerCase()),
-                  )
-                  .map((app) => (
+                {filteredApplications.map((app) => (
                     <article key={app.id} className="app-card">
                       <div className="app-head">
-                        <h3>{app.name}</h3>
-                        <span className={app.status}>{app.status.toUpperCase()}</span>
+                        <div className="app-title-wrap">
+                          <div className="app-icon">
+                            <svg viewBox="0 0 20 20" aria-hidden="true">
+                              <rect x="3" y="4" width="14" height="12" rx="2" />
+                              <line x1="3" y1="8" x2="17" y2="8" />
+                            </svg>
+                          </div>
+                          <div>
+                            <h3>{app.name}</h3>
+                            <small>{app.usage}</small>
+                          </div>
+                        </div>
+                        <span className={`status-pill ${app.status}`}>
+                          <i />
+                          {app.status.toUpperCase()}
+                        </span>
                       </div>
-                      <small>{app.usage}</small>
                       <p>{app.description}</p>
+                      <div className="app-footer">
+                        <div className="app-users">
+                          <div className="avatar-stack" aria-hidden="true">
+                            <span>👨🏻‍💼</span>
+                            <span>👩🏽‍💼</span>
+                            <span>40+</span>
+                          </div>
+                          <strong>Users</strong>
+                        </div>
+                        <button
+                          className="app-open-btn"
+                          type="button"
+                          aria-label={`Open ${app.name}`}
+                          disabled={app.status !== 'active'}
+                          onClick={() => openApplication(app)}
+                        >
+                          <img
+                            src={app.status === 'active' ? '/BlackButton.svg' : '/GreyButton.svg'}
+                            alt=""
+                          />
+                        </button>
+                      </div>
                     </article>
                   ))}
               </div>
@@ -412,6 +403,56 @@ function App() {
     )
   }
 
+  if (isFrappeAuthenticated) {
+    return (
+      <main className="login-page">
+        <section className="branding-panel">
+          <div className="branding-content">
+            <img
+              src="/KalyanLogo/KalyanLogo.svg"
+              alt="Kalyan logo"
+              className="kalyan-logo"
+            />
+            <h1>UNIFIED ACCESS</h1>
+            <p>
+              Complete Keycloak sign-in to access all integrated applications without
+              additional logins.
+            </p>
+          </div>
+        </section>
+
+        <section className="form-panel">
+          <form className="login-card" onSubmit={handleKeycloakLogin}>
+            <h2>KEYCLOAK LOGIN</h2>
+            <p className="subtitle">
+              This step enables single sign-on for all applications listed inside this
+              portal.
+            </p>
+
+            {error ? <p className="error-text">{error}</p> : null}
+
+            <button className="login-btn" type="submit" disabled={loading}>
+              {loading ? 'Logging in...' : 'Continue with Keycloak'}
+            </button>
+          </form>
+        </section>
+      </main>
+    )
+  }
+
+  if (checkingFrappeSession) {
+    return (
+      <main className="login-page">
+        <section className="form-panel">
+          <div className="login-card">
+            <h2>Loading</h2>
+            <p className="subtitle">Checking your portal session...</p>
+          </div>
+        </section>
+      </main>
+    )
+  }
+
   return (
     <main className="login-page">
       <section className="branding-panel">
@@ -429,10 +470,10 @@ function App() {
       </section>
 
       <section className="form-panel">
-        <form className="login-card" onSubmit={handleLogin}>
+        <form className="login-card" onSubmit={handleFrappeLogin}>
           <h2>WELCOME BACK</h2>
           <p className="subtitle">
-            Enter your email and password to access your account
+            Login with your portal credentials to access this web application
           </p>
 
           <label htmlFor="usr">Email or username</label>
@@ -470,7 +511,7 @@ function App() {
           {error ? <p className="error-text">{error}</p> : null}
 
           <button className="login-btn" type="submit" disabled={loading}>
-            {loading ? 'Logging in...' : 'Login'}
+            {loading ? 'Logging in...' : 'Login to Portal'}
           </button>
 
           <div className="divider">or</div>

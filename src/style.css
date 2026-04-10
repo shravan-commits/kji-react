@@ -299,18 +299,6 @@ body {
   gap: 14px;
 }
 
-.demo-badge {
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #6b4e00;
-  background: #fff3cd;
-  border: 1px solid #ffc107;
-  border-radius: 999px;
-  padding: 4px 10px;
-}
-
 .topbar p {
   margin: 0;
   color: #595c66;
@@ -984,38 +972,16 @@ tbody td {
   background: #f4f5f7;
 }
 
-.user-list-view-more-wrap {
-  display: flex;
-  justify-content: center;
-  margin-top: 20px;
+.user-list-status {
+  text-align: center;
+  padding: 28px 16px !important;
+  font-size: 13px;
+  color: #595c66;
 }
 
-.user-list-view-more {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  border: none;
-  background: none;
-  padding: 4px 8px;
-  cursor: pointer;
-  font-family: 'Anek Malayalam', Roboto, 'Segoe UI', Tahoma, Geneva, Verdana,
-    sans-serif;
-  font-weight: 600;
-  font-size: 15px;
-  line-height: 1.25;
-  letter-spacing: 0;
-  text-transform: capitalize;
-  color: #2a2d34;
-}
-
-.user-list-view-more:hover {
-  color: #0f1114;
-}
-
-.user-list-view-more-arrow {
-  font-size: 15px;
-  font-weight: 400;
-  line-height: 1;
+.user-list-error {
+  color: #b42318;
+  font-weight: 500;
 }
 
 .table-card h4 {

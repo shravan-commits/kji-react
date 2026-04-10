@@ -31,6 +31,11 @@ function getKeycloakConfig(): KeycloakConfig | null {
   return { url, realm, clientId }
 }
 
+/** False when any of the Keycloak env vars are missing (portal cannot complete SSO). */
+export function isKeycloakConfigured(): boolean {
+  return getKeycloakConfig() !== null
+}
+
 let keycloak: Keycloak | null = null
 
 let keycloakInitialized = false
@@ -100,4 +105,17 @@ export function getCurrentUserLabel() {
   const email = typeof parsed.email === 'string' ? parsed.email : ''
 
   return preferredUsername || email
+}
+
+/** Full name or username from the OIDC token (for profile UI). */
+export function getCurrentUserDisplayName() {
+  if (!keycloak?.tokenParsed) {
+    return ''
+  }
+  const parsed = keycloak.tokenParsed
+  const name = typeof parsed.name === 'string' ? parsed.name : ''
+  const preferredUsername =
+    typeof parsed.preferred_username === 'string' ? parsed.preferred_username : ''
+  const email = typeof parsed.email === 'string' ? parsed.email : ''
+  return name || preferredUsername || email
 }

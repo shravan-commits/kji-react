@@ -1,14 +1,19 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { FrappeProvider, useFrappeAuth } from 'frappe-react-sdk'
 import {
+  FrappeProvider,
+  useFrappeAuth,
+  useFrappeGetDocList,
+} from 'frappe-react-sdk'
+import {
+  getCurrentUserDisplayName,
   getCurrentUserLabel,
   isKeycloakAuthenticated,
+  isKeycloakConfigured,
   loginWithKeycloak,
   logoutFromKeycloak,
 } from './keycloakAuth'
 import { getFrappeLoginRedirectUrl } from './frappeAuth'
-import { isDemoMode } from './demoMode'
 import { resolveFrappeEnableSocket, resolveFrappeProviderUrl } from './frappeSdk'
 import {
   getMaintenanceInfo,
@@ -19,7 +24,7 @@ import {
 import { FullMaintenanceView, NoAccessView } from './portalViews'
 import './style.css'
 
-type MenuKey = 'dashboard' | 'applications' | 'users'
+type MenuKey = 'applications' | 'users'
 
 type ApplicationCard = {
   id: number
@@ -88,38 +93,62 @@ const applications: ApplicationCard[] = [
   },
 ]
 
-const users: UserRow[] = Array.from({ length: 10 }, (_, index) => ({
-  id: `KJ - EMP - 00012${index}`,
-  name: 'Muhammed Rahman',
-  type: 'ADMIN',
-  status: 'ACTIVE',
-  primaryLocation: 'Malappuram',
-  locationRights: 'Dubai Gold Souk',
-}))
+type FrappeUserDoc = {
+  name: string
+  full_name?: string | null
+  enabled?: number | boolean | null
+  user_type?: string | null
+}
 
 function PortalApp() {
-  const demo = isDemoMode()
   const {
     currentUser,
     isLoading: frappeAuthLoading,
     logout: logoutFrappeSession,
   } = useFrappeAuth()
-  const isFrappeAuthenticated = demo || Boolean(currentUser)
+  const isFrappeAuthenticated = Boolean(currentUser)
   const [hasKeycloakSession, setHasKeycloakSession] = useState(
-    demo || isKeycloakAuthenticated(),
+    isKeycloakAuthenticated(),
   )
-  const checkingFrappeSession = !demo && frappeAuthLoading
+  const checkingFrappeSession = frappeAuthLoading
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
   const [search, setSearch] = useState('')
 
+  const userListSwrKey = activeMenu === 'users' ? undefined : null
+  const {
+    data: userDocs,
+    isLoading: usersListLoading,
+    error: usersListError,
+  } = useFrappeGetDocList<FrappeUserDoc>(
+    'User',
+    {
+      fields: ['name', 'full_name', 'enabled', 'user_type'],
+      filters: [['name', '!=', 'Guest']],
+      limit: 100,
+      orderBy: { field: 'full_name', order: 'asc' },
+    },
+    userListSwrKey,
+    { revalidateOnFocus: false, shouldRetryOnError: false },
+  )
+
+  const users: UserRow[] = (userDocs ?? []).map((u) => ({
+    id: u.name,
+    name: (u.full_name || u.name).trim() || u.name,
+    type: (u.user_type || '—').trim(),
+    status:
+      u.enabled === 0 || u.enabled === false ? 'INACTIVE' : 'ACTIVE',
+    primaryLocation: '—',
+    locationRights: '—',
+  }))
+
   useEffect(() => {
-    if (demo || checkingFrappeSession || isFrappeAuthenticated) {
+    if (checkingFrappeSession || isFrappeAuthenticated) {
       return
     }
     window.location.assign(getFrappeLoginRedirectUrl())
-  }, [demo, checkingFrappeSession, isFrappeAuthenticated])
+  }, [checkingFrappeSession, isFrappeAuthenticated])
 
   const handleKeycloakLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -150,12 +179,13 @@ function PortalApp() {
     !maintenance &&
     (isNoAccessForced() || availableApplications.length === 0)
 
-  const sessionEmail = demo
-    ? 'demo@kalyan.local'
-    : getCurrentUserLabel() || undefined
+  const sessionEmail =
+    getCurrentUserLabel() || (typeof currentUser === 'string' ? currentUser : undefined)
+  const displayName =
+    getCurrentUserDisplayName() || (typeof currentUser === 'string' ? currentUser : '') || 'User'
   const noAccessProfile = resolveNoAccessProfile({
     sessionEmail,
-    sessionName: 'Kalyan Admin',
+    sessionName: displayName,
   })
   const maintenanceInfo = getMaintenanceInfo()
 
@@ -169,10 +199,6 @@ function PortalApp() {
 
   const handlePortalLogout = async () => {
     setError('')
-    if (demo) {
-      window.location.reload()
-      return
-    }
     try {
       await logoutFrappeSession()
     } catch {
@@ -187,7 +213,7 @@ function PortalApp() {
     setActiveMenu('applications')
   }
 
-  if (demo || (isFrappeAuthenticated && hasKeycloakSession)) {
+  if (isFrappeAuthenticated && hasKeycloakSession) {
     return (
       <main className="portal-layout">
         <aside className="sidebar">
@@ -261,20 +287,11 @@ function PortalApp() {
                   : 'Users'}
             </p>
             <div className="topbar-right">
-              {demo ? (
-                <span className="demo-badge" title="No Frappe/Keycloak; UI only">
-                  Demo mode
-                </span>
-              ) : null}
               <div className="profile-mini">
                 <img src="/UserIcon.svg" alt="Profile" className="profile-avatar" />
                 <div className="profile-details">
-                  <strong>Kalyan Admin</strong>
-                  <span>
-                    {demo
-                      ? 'demo@kalyan.local'
-                      : getCurrentUserLabel() || 'authenticated@kalyan.local'}
-                  </span>
+                  <strong>{displayName}</strong>
+                  <span>{sessionEmail || currentUser || ''}</span>
                 </div>
               </div>
             </div>
@@ -446,38 +463,75 @@ function PortalApp() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredUsers.map((item) => (
-                        <tr key={item.id}>
-                          <td>{item.id}</td>
-                          <td>{item.name}</td>
-                          <td>
-                            <span className="pill muted">{item.type}</span>
-                          </td>
-                          <td>
-                            <span className="pill green">{item.status}</span>
-                          </td>
-                          <td>{item.primaryLocation}</td>
-                          <td>{item.locationRights}</td>
-                          <td>
-                            <button type="button" className="user-row-action">
-                              View
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                    {usersListLoading ? (
+                      <tr>
+                        <td colSpan={7} className="user-list-status">
+                          Loading users…
+                        </td>
+                      </tr>
+                    ) : null}
+                    {!usersListLoading && usersListError ? (
+                      <tr>
+                        <td colSpan={7} className="user-list-status user-list-error">
+                          Unable to load users. Ensure you have permission to read the User
+                          doctype on your Frappe site.
+                        </td>
+                      </tr>
+                    ) : null}
+                    {!usersListLoading && !usersListError
+                      ? filteredUsers.map((item) => (
+                          <tr key={item.id}>
+                            <td>{item.id}</td>
+                            <td>{item.name}</td>
+                            <td>
+                              <span className="pill muted">{item.type}</span>
+                            </td>
+                            <td>
+                              <span
+                                className={`pill ${item.status === 'ACTIVE' ? 'green' : 'muted'}`}
+                              >
+                                {item.status}
+                              </span>
+                            </td>
+                            <td>{item.primaryLocation}</td>
+                            <td>{item.locationRights}</td>
+                            <td>
+                              <button type="button" className="user-row-action">
+                                View
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      : null}
+                    {!usersListLoading && !usersListError && filteredUsers.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="user-list-status">
+                          No users found.
+                        </td>
+                      </tr>
+                    ) : null}
                   </tbody>
                 </table>
               </div>
-              <div className="user-list-view-more-wrap">
-                <button type="button" className="user-list-view-more">
-                  View More
-                  <span className="user-list-view-more-arrow" aria-hidden>
-                    →
-                  </span>
-                </button>
-              </div>
             </section>
           ) : null}
+        </section>
+      </main>
+    )
+  }
+
+  if (isFrappeAuthenticated && !isKeycloakConfigured()) {
+    return (
+      <main className="login-page">
+        <section className="form-panel">
+          <div className="login-card">
+            <h2>Configuration required</h2>
+            <p className="subtitle">
+              Keycloak is not configured for this deployment. Set{' '}
+              <strong>VITE_KEYCLOAK_URL</strong>, <strong>VITE_KEYCLOAK_REALM</strong>, and{' '}
+              <strong>VITE_KEYCLOAK_CLIENT_ID</strong>, then rebuild the app and reload.
+            </p>
+          </div>
         </section>
       </main>
     )

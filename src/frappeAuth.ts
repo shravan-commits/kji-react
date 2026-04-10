@@ -20,11 +20,17 @@ type FrappeSessionUserResponse = {
   message?: string
 }
 
-function resolveFrappeBaseUrl() {
-  return (
-    import.meta.env.VITE_FRAPPE_BASE_URL?.trim() ||
-    window.location.origin
-  ).replace(/\/+$/, '')
+/** Frappe site origin for login redirects and direct API calls (matches SDK public URL). */
+export function resolveFrappeBaseUrl() {
+  const explicit = import.meta.env.VITE_FRAPPE_URL?.trim()
+  if (explicit) {
+    return explicit.replace(/\/+$/, '')
+  }
+  const base = import.meta.env.VITE_FRAPPE_BASE_URL?.trim()
+  if (base) {
+    return base.replace(/\/+$/, '')
+  }
+  return window.location.origin.replace(/\/+$/, '')
 }
 
 /** Send users to Frappe login; after login Frappe should redirect back to this app. */

@@ -8,7 +8,7 @@ export function isMaintenanceMode() {
   return truthyEnv(import.meta.env.VITE_MAINTENANCE_MODE)
 }
 
-/** Force the no-access screen (useful for demos). Otherwise the screen appears when there are zero active applications. */
+/** Force the no-access screen. Otherwise the screen appears when there are zero active applications. */
 export function isNoAccessForced() {
   return truthyEnv(import.meta.env.VITE_NO_ACCESS_MODE)
 }

@@ -1,7 +1,7 @@
 /**
  * URL passed to frappe-react-sdk FrappeProvider.
- * - Dev + Vite proxy (Doppio-style): empty string → requests use the dev server origin; proxy forwards to Frappe.
- * - Prod / direct API: set VITE_FRAPPE_URL or VITE_FRAPPE_BASE_URL.
+ * - Development: default empty string → browser targets the Vite dev server; proxy forwards to Frappe.
+ * - Production / direct API: set VITE_FRAPPE_URL or VITE_FRAPPE_BASE_URL.
  */
 export function resolveFrappeProviderUrl(): string {
   const explicit = import.meta.env.VITE_FRAPPE_URL?.trim()
@@ -15,7 +15,7 @@ export function resolveFrappeProviderUrl(): string {
   return base.replace(/\/+$/, '')
 }
 
-/** True when realtime (socket.io) should be enabled — mint-style; needs site + port in dev. */
+/** True when the SDK should open a Socket.IO connection (site name + port in dev). */
 export function resolveFrappeEnableSocket(): boolean {
   if (import.meta.env.VITE_FRAPPE_ENABLE_SOCKET === 'false') {
     return false

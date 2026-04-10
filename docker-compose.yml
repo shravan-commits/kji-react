@@ -22,6 +22,7 @@ services:
         VITE_APP_WAREHOUSE_URL: ${VITE_APP_WAREHOUSE_URL:-}
         VITE_APP_SALES_URL: ${VITE_APP_SALES_URL:-}
         VITE_APP_FINANCE_URL: ${VITE_APP_FINANCE_URL:-}
+        VITE_DEMO_MODE: ${VITE_DEMO_MODE:-}
     ports:
       - "${DOCKER_WEB_PORT:-8080}:80"
     restart: unless-stopped

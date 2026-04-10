@@ -32,8 +32,9 @@ function resolveWebserverPort(): string {
 
 const webserver_port = resolveWebserverPort()
 
+// Require a segment boundary after `app` (etc.) so `/applications` is not proxied to Frappe.
 export default {
-  '^/(app|api|assets|files|private)': {
+  '^/(app|api|assets|files|private)(/|$)': {
     target: `http://127.0.0.1:${webserver_port}`,
     ws: true,
     router(req: { headers: { host?: string } }) {

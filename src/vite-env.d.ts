@@ -3,7 +3,6 @@
 interface ImportMetaEnv {
   readonly VITE_FRAPPE_URL?: string
   readonly VITE_FRAPPE_BASE_URL?: string
-  readonly VITE_FRAPPE_LOGIN_URL?: string
   readonly VITE_FRAPPE_ENABLE_SOCKET?: string
   readonly VITE_SOCKET_PORT?: string
   readonly VITE_SITE_NAME?: string

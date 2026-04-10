@@ -1,0 +1,27 @@
+# Loads variables from a .env file in this directory (for build args).
+# Create .env from .env.example, then:
+#   docker compose build
+#   docker compose up -d
+#
+# Or override: docker compose build --build-arg VITE_FRAPPE_BASE_URL=https://...
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_FRAPPE_BASE_URL: ${VITE_FRAPPE_BASE_URL:-}
+        VITE_FRAPPE_LOGIN_URL: ${VITE_FRAPPE_LOGIN_URL:-}
+        VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-}
+        VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-}
+        VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-}
+        VITE_KEYCLOAK_REDIRECT_URI: ${VITE_KEYCLOAK_REDIRECT_URI:-}
+        VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI: ${VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI:-}
+        VITE_APP_HR_URL: ${VITE_APP_HR_URL:-}
+        VITE_APP_WAREHOUSE_URL: ${VITE_APP_WAREHOUSE_URL:-}
+        VITE_APP_SALES_URL: ${VITE_APP_SALES_URL:-}
+        VITE_APP_FINANCE_URL: ${VITE_APP_FINANCE_URL:-}
+    ports:
+      - "${DOCKER_WEB_PORT:-8080}:80"
+    restart: unless-stopped

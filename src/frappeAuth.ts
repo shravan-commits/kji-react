@@ -27,6 +27,18 @@ function resolveFrappeBaseUrl() {
   ).replace(/\/+$/, '')
 }
 
+/** Send users to Frappe login; after login Frappe should redirect back to this app. */
+export function getFrappeLoginRedirectUrl() {
+  const custom = import.meta.env.VITE_FRAPPE_LOGIN_URL?.trim()
+  const returnUrl = window.location.href
+  if (custom) {
+    const sep = custom.includes('?') ? '&' : '?'
+    return `${custom}${sep}redirect-to=${encodeURIComponent(returnUrl)}`
+  }
+  const baseUrl = resolveFrappeBaseUrl()
+  return `${baseUrl}/login?redirect-to=${encodeURIComponent(returnUrl)}`
+}
+
 export async function loginWithFrappe(payload: LoginPayload) {
   const baseUrl = resolveFrappeBaseUrl()
   const body = new URLSearchParams({

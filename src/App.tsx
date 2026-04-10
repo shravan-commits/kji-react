@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   getCurrentUserLabel,
@@ -6,7 +6,11 @@ import {
   loginWithKeycloak,
   logoutFromKeycloak,
 } from './keycloakAuth'
-import { getFrappeSessionUser, loginWithFrappe, logoutFromFrappe } from './frappeAuth'
+import {
+  getFrappeLoginRedirectUrl,
+  getFrappeSessionUser,
+  logoutFromFrappe,
+} from './frappeAuth'
 import './style.css'
 
 type MenuKey = 'dashboard' | 'applications' | 'users'
@@ -87,17 +91,7 @@ const users: UserRow[] = Array.from({ length: 10 }, (_, index) => ({
   locationRights: 'Dubai Gold Souk',
 }))
 
-const DEFAULT_USERNAME = 'admin@example.com'
-const DEFAULT_PASSWORD = ''
-
 function App() {
-  const rememberedUser = useMemo(
-    () => localStorage.getItem('kalyan_remember_usr') ?? '',
-    [],
-  )
-  const [usr, setUsr] = useState(rememberedUser || DEFAULT_USERNAME)
-  const [pwd, setPwd] = useState(DEFAULT_PASSWORD)
-  const [rememberMe, setRememberMe] = useState(Boolean(rememberedUser))
   const [isFrappeAuthenticated, setIsFrappeAuthenticated] = useState(false)
   const [hasKeycloakSession, setHasKeycloakSession] = useState(isKeycloakAuthenticated())
   const [checkingFrappeSession, setCheckingFrappeSession] = useState(true)
@@ -134,21 +128,12 @@ function App() {
     }
   }, [])
 
-  const handleFrappeLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    setError('')
-    setLoading(true)
-
-    try {
-      await loginWithFrappe({ usr, pwd, rememberMe })
-      setIsFrappeAuthenticated(true)
-    } catch (e) {
-      const message = e instanceof Error ? e.message : 'Frappe login failed.'
-      setError(message)
-    } finally {
-      setLoading(false)
+  useEffect(() => {
+    if (checkingFrappeSession || isFrappeAuthenticated) {
+      return
     }
-  }
+    window.location.assign(getFrappeLoginRedirectUrl())
+  }, [checkingFrappeSession, isFrappeAuthenticated])
 
   const handleKeycloakLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -455,79 +440,11 @@ function App() {
 
   return (
     <main className="login-page">
-      <section className="branding-panel">
-        <div className="branding-content">
-          <img
-            src="/KalyanLogo/KalyanLogo.svg"
-            alt="Kalyan logo"
-            className="kalyan-logo"
-          />
-          <h1>LOGIN TO KALYAN</h1>
-          <p>
-            Unified authentication portal for multiple Kalyan applications.
-          </p>
-        </div>
-      </section>
-
       <section className="form-panel">
-        <form className="login-card" onSubmit={handleFrappeLogin}>
-          <h2>WELCOME BACK</h2>
-          <p className="subtitle">
-            Login with your portal credentials to access this web application
-          </p>
-
-          <label htmlFor="usr">Email or username</label>
-          <input
-            id="usr"
-            type="text"
-            placeholder="Enter your email"
-            value={usr}
-            onChange={(event) => setUsr(event.target.value)}
-            required
-          />
-
-          <label htmlFor="pwd">Password</label>
-          <input
-            id="pwd"
-            type="password"
-            placeholder="Enter your password"
-            value={pwd}
-            onChange={(event) => setPwd(event.target.value)}
-            required
-          />
-
-          <div className="form-row">
-            <label className="remember">
-              <input
-                type="checkbox"
-                checked={rememberMe}
-                onChange={(event) => setRememberMe(event.target.checked)}
-              />
-              Remember me
-            </label>
-            <a href="/forgot-password">Forgot Password</a>
-          </div>
-
-          {error ? <p className="error-text">{error}</p> : null}
-
-          <button className="login-btn" type="submit" disabled={loading}>
-            {loading ? 'Logging in...' : 'Login to Portal'}
-          </button>
-
-          <div className="divider">or</div>
-
-          <button
-            className="google-btn"
-            type="button"
-            onClick={() => {
-              const url =
-                import.meta.env.VITE_GOOGLE_AUTH_URL || '/api/method/google_login'
-              window.location.assign(url)
-            }}
-          >
-            Continue with Google
-          </button>
-        </form>
+        <div className="login-card">
+          <h2>Redirecting</h2>
+          <p className="subtitle">Taking you to Frappe login...</p>
+        </div>
       </section>
     </main>
   )

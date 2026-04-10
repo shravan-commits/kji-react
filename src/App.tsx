@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   getCurrentUserLabel,
@@ -6,7 +6,19 @@ import {
   loginWithKeycloak,
   logoutFromKeycloak,
 } from './keycloakAuth'
-import { getFrappeSessionUser, loginWithFrappe, logoutFromFrappe } from './frappeAuth'
+import {
+  getFrappeLoginRedirectUrl,
+  getFrappeSessionUser,
+  logoutFromFrappe,
+} from './frappeAuth'
+import { isDemoMode } from './demoMode'
+import {
+  getMaintenanceInfo,
+  isMaintenanceMode,
+  isNoAccessForced,
+  resolveNoAccessProfile,
+} from './portalState'
+import { FullMaintenanceView, NoAccessView } from './portalViews'
 import './style.css'
 
 type MenuKey = 'dashboard' | 'applications' | 'users'
@@ -87,26 +99,23 @@ const users: UserRow[] = Array.from({ length: 10 }, (_, index) => ({
   locationRights: 'Dubai Gold Souk',
 }))
 
-const DEFAULT_USERNAME = 'admin@example.com'
-const DEFAULT_PASSWORD = ''
-
 function App() {
-  const rememberedUser = useMemo(
-    () => localStorage.getItem('kalyan_remember_usr') ?? '',
-    [],
+  const demo = isDemoMode()
+  const [isFrappeAuthenticated, setIsFrappeAuthenticated] = useState(demo)
+  const [hasKeycloakSession, setHasKeycloakSession] = useState(
+    demo || isKeycloakAuthenticated(),
   )
-  const [usr, setUsr] = useState(rememberedUser || DEFAULT_USERNAME)
-  const [pwd, setPwd] = useState(DEFAULT_PASSWORD)
-  const [rememberMe, setRememberMe] = useState(Boolean(rememberedUser))
-  const [isFrappeAuthenticated, setIsFrappeAuthenticated] = useState(false)
-  const [hasKeycloakSession, setHasKeycloakSession] = useState(isKeycloakAuthenticated())
-  const [checkingFrappeSession, setCheckingFrappeSession] = useState(true)
+  const [checkingFrappeSession, setCheckingFrappeSession] = useState(!demo)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
   const [search, setSearch] = useState('')
 
   useEffect(() => {
+    if (demo) {
+      return
+    }
+
     let mounted = true
 
     async function bootstrapFrappeSession() {
@@ -132,23 +141,14 @@ function App() {
     return () => {
       mounted = false
     }
-  }, [])
+  }, [demo])
 
-  const handleFrappeLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    setError('')
-    setLoading(true)
-
-    try {
-      await loginWithFrappe({ usr, pwd, rememberMe })
-      setIsFrappeAuthenticated(true)
-    } catch (e) {
-      const message = e instanceof Error ? e.message : 'Frappe login failed.'
-      setError(message)
-    } finally {
-      setLoading(false)
+  useEffect(() => {
+    if (demo || checkingFrappeSession || isFrappeAuthenticated) {
+      return
     }
-  }
+    window.location.assign(getFrappeLoginRedirectUrl())
+  }, [demo, checkingFrappeSession, isFrappeAuthenticated])
 
   const handleKeycloakLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -173,11 +173,51 @@ function App() {
     window.open(app.launchUrl, '_blank', 'noopener,noreferrer')
   }
 
+  const maintenance = isMaintenanceMode()
+  const availableApplications = applications.filter((app) => app.status === 'active')
+  const noAccess =
+    !maintenance &&
+    (isNoAccessForced() || availableApplications.length === 0)
+
+  const sessionEmail = demo
+    ? 'demo@kalyan.local'
+    : getCurrentUserLabel() || undefined
+  const noAccessProfile = resolveNoAccessProfile({
+    sessionEmail,
+    sessionName: 'Kalyan Admin',
+  })
+  const maintenanceInfo = getMaintenanceInfo()
+
   const filteredApplications = applications.filter((app) =>
     app.name.toLowerCase().includes(search.trim().toLowerCase()),
   )
 
-  if (isFrappeAuthenticated && hasKeycloakSession) {
+  const filteredUsers = users.filter((item) =>
+    item.name.toLowerCase().includes(search.trim().toLowerCase()),
+  )
+
+  const handlePortalLogout = async () => {
+    setError('')
+    if (demo) {
+      window.location.reload()
+      return
+    }
+    try {
+      await logoutFromFrappe()
+    } catch {
+      // Ignore logout API errors and continue local cleanup.
+    }
+    try {
+      await logoutFromKeycloak()
+    } catch {
+      // Ignore Keycloak redirect errors and continue local cleanup.
+    }
+    setHasKeycloakSession(false)
+    setIsFrappeAuthenticated(false)
+    setActiveMenu('applications')
+  }
+
+  if (demo || (isFrappeAuthenticated && hasKeycloakSession)) {
     return (
       <main className="portal-layout">
         <aside className="sidebar">
@@ -216,25 +256,7 @@ function App() {
               </svg>
               Settings
             </button>
-            <button
-              className="ghost-btn logout"
-              onClick={async () => {
-                setError('')
-                try {
-                  await logoutFromFrappe()
-                } catch {
-                  // Ignore logout API errors and continue local cleanup.
-                }
-                try {
-                  await logoutFromKeycloak()
-                } catch {
-                  // Ignore Keycloak redirect errors and continue local cleanup.
-                }
-                setHasKeycloakSession(false)
-                setIsFrappeAuthenticated(false)
-                setActiveMenu('applications')
-              }}
-            >
+            <button className="ghost-btn logout" onClick={handlePortalLogout}>
               <svg viewBox="0 0 24 24" className="menu-icon" aria-hidden="true">
                 <path
                   d="M15 7V5a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-2"
@@ -260,17 +282,50 @@ function App() {
 
         <section className="content-shell">
           <header className="topbar">
-            <p>Dashboard / {activeMenu === 'applications' ? 'Applications' : 'Users'}</p>
-            <div className="profile-mini">
-              <img src="/UserIcon.svg" alt="Profile" className="profile-avatar" />
-              <div className="profile-details">
-                <strong>Kalyan Admin</strong>
-                <span>{getCurrentUserLabel() || 'authenticated@kalyan.local'}</span>
+            <p>
+              Dashboard /{' '}
+              {maintenance
+                ? 'Maintenance'
+                : activeMenu === 'applications'
+                  ? 'Applications'
+                  : 'Users'}
+            </p>
+            <div className="topbar-right">
+              {demo ? (
+                <span className="demo-badge" title="No Frappe/Keycloak; UI only">
+                  Demo mode
+                </span>
+              ) : null}
+              <div className="profile-mini">
+                <img src="/UserIcon.svg" alt="Profile" className="profile-avatar" />
+                <div className="profile-details">
+                  <strong>Kalyan Admin</strong>
+                  <span>
+                    {demo
+                      ? 'demo@kalyan.local'
+                      : getCurrentUserLabel() || 'authenticated@kalyan.local'}
+                  </span>
+                </div>
               </div>
             </div>
           </header>
 
-          {activeMenu === 'applications' ? (
+          {maintenance ? (
+            <FullMaintenanceView
+              info={maintenanceInfo}
+              onBackToPortal={() => setActiveMenu('applications')}
+            />
+          ) : null}
+
+          {!maintenance && activeMenu === 'applications' && noAccess ? (
+            <NoAccessView
+              profile={noAccessProfile}
+              onBackToPortal={() => setActiveMenu('applications')}
+              onLogout={handlePortalLogout}
+            />
+          ) : null}
+
+          {!maintenance && activeMenu === 'applications' && !noAccess ? (
             <section className="view-wrap">
               <h1>Integrated Applications</h1>
               <p className="view-subtitle">
@@ -281,105 +336,147 @@ function App() {
                 <h2>
                   All Applications <span>({filteredApplications.length})</span>
                 </h2>
-                <div className="apps-controls">
-                  <input
-                    placeholder="Search application"
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
-                  <button type="button" className="icon-btn" aria-label="Search">
-                    🔍
-                  </button>
-                  <button type="button" className="icon-btn" aria-label="Filter">
-                    ⌕
-                  </button>
-                  <button type="button" className="sort-btn">
-                    Sort by
+                <div className="toolbar-filters">
+                  <div className="search-pill">
+                    <input
+                      className="search-pill-input"
+                      type="search"
+                      placeholder="Search application"
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      aria-label="Search applications"
+                    />
+                    <button
+                      type="button"
+                      className="search-pill-action"
+                      aria-label="Search"
+                    >
+                      <img src="/searchButton.svg" width={30} height={30} alt="" />
+                    </button>
+                  </div>
+                  <button type="button" className="sort-pill">
+                    <img
+                      src="/sortButton.svg"
+                      className="sort-pill-icon"
+                      width={30}
+                      height={30}
+                      alt=""
+                    />
+                    <span className="sort-pill-label">Sort by</span>
+                    <span className="sort-pill-chevron" aria-hidden>
+                      ▼
+                    </span>
                   </button>
                 </div>
               </div>
               <div className="apps-grid">
                 {filteredApplications.map((app) => (
-                    <article key={app.id} className="app-card">
-                      <div className="app-head">
-                        <div className="app-title-wrap">
-                          <div className="app-icon">
-                            <svg viewBox="0 0 20 20" aria-hidden="true">
-                              <rect x="3" y="4" width="14" height="12" rx="2" />
-                              <line x1="3" y1="8" x2="17" y2="8" />
-                            </svg>
-                          </div>
-                          <div>
-                            <h3>{app.name}</h3>
-                            <small>{app.usage}</small>
-                          </div>
+                  <article key={app.id} className="app-card">
+                    <div className="app-head">
+                      <div className="app-title-wrap">
+                        <div className="app-icon">
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <rect x="3" y="4" width="14" height="12" rx="2" />
+                            <line x1="3" y1="8" x2="17" y2="8" />
+                          </svg>
                         </div>
-                        <span className={`status-pill ${app.status}`}>
-                          <i />
-                          {app.status.toUpperCase()}
-                        </span>
-                      </div>
-                      <p>{app.description}</p>
-                      <div className="app-footer">
-                        <div className="app-users">
-                          <div className="avatar-stack" aria-hidden="true">
-                            <span>👨🏻‍💼</span>
-                            <span>👩🏽‍💼</span>
-                            <span>40+</span>
-                          </div>
-                          <strong>Users</strong>
+                        <div>
+                          <h3>{app.name}</h3>
+                          <small>{app.usage}</small>
                         </div>
-                        <button
-                          className="app-open-btn"
-                          type="button"
-                          aria-label={`Open ${app.name}`}
-                          disabled={app.status !== 'active'}
-                          onClick={() => openApplication(app)}
-                        >
-                          <img
-                            src={app.status === 'active' ? '/BlackButton.svg' : '/GreyButton.svg'}
-                            alt=""
-                          />
-                        </button>
                       </div>
-                    </article>
-                  ))}
+                      <span className={`status-pill ${app.status}`}>
+                        <i />
+                        {app.status.toUpperCase()}
+                      </span>
+                    </div>
+                    <p>{app.description}</p>
+                    <div className="app-footer">
+                      <div className="app-users">
+                        <div className="avatar-stack" aria-hidden="true">
+                          <span>👨🏻‍💼</span>
+                          <span>👩🏽‍💼</span>
+                          <span>40+</span>
+                        </div>
+                        <strong>Users</strong>
+                      </div>
+                      <button
+                        className="app-open-btn"
+                        type="button"
+                        aria-label={`Open ${app.name}`}
+                        disabled={app.status !== 'active'}
+                        onClick={() => openApplication(app)}
+                      >
+                        <img
+                          src={app.status === 'active' ? '/BlackButton.svg' : '/GreyButton.svg'}
+                          alt=""
+                        />
+                      </button>
+                    </div>
+                  </article>
+                ))}
               </div>
             </section>
           ) : null}
 
-          {activeMenu === 'users' ? (
+          {!maintenance && activeMenu === 'users' ? (
             <section className="view-wrap">
               <h1>Our Users</h1>
               <p className="view-subtitle">
                 Access detailed information and manage user records seamlessly.
               </p>
               <div className="table-toolbar">
-                <h2>User List</h2>
-                <input
-                  placeholder="Search user"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                />
+                <h2>
+                  User List <span>({filteredUsers.length})</span>
+                </h2>
+                <div className="toolbar-filters">
+                  <div className="search-pill">
+                    <input
+                      className="search-pill-input"
+                      type="search"
+                      placeholder="Search user"
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      aria-label="Search users"
+                    />
+                    <button
+                      type="button"
+                      className="search-pill-action"
+                      aria-label="Search"
+                    >
+                      <img src="/searchButton.svg" width={30} height={30} alt="" />
+                    </button>
+                  </div>
+                  <button type="button" className="sort-pill">
+                    <img
+                      src="/sortButton.svg"
+                      className="sort-pill-icon"
+                      width={30}
+                      height={30}
+                      alt=""
+                    />
+                    <span className="sort-pill-label">Sort by</span>
+                    <span className="sort-pill-chevron" aria-hidden>
+                      ▼
+                    </span>
+                  </button>
+                </div>
               </div>
-              <div className="table-card">
-                <table>
+              <div className="table-card user-list-card">
+                <table className="user-list-table">
                   <thead>
                     <tr>
-                      <th>Protal UID</th>
+                      <th>Portal UID</th>
                       <th>Name</th>
                       <th>Type</th>
                       <th>Status</th>
                       <th>Primary Location</th>
                       <th>Location Rights</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {users
-                      .filter((item) =>
-                        item.name.toLowerCase().includes(search.trim().toLowerCase()),
-                      )
-                      .map((item) => (
+                    {filteredUsers.map((item) => (
                         <tr key={item.id}>
                           <td>{item.id}</td>
                           <td>{item.name}</td>
@@ -391,10 +488,23 @@ function App() {
                           </td>
                           <td>{item.primaryLocation}</td>
                           <td>{item.locationRights}</td>
+                          <td>
+                            <button type="button" className="user-row-action">
+                              View
+                            </button>
+                          </td>
                         </tr>
                       ))}
                   </tbody>
                 </table>
+              </div>
+              <div className="user-list-view-more-wrap">
+                <button type="button" className="user-list-view-more">
+                  View More
+                  <span className="user-list-view-more-arrow" aria-hidden>
+                    →
+                  </span>
+                </button>
               </div>
             </section>
           ) : null}
@@ -455,79 +565,11 @@ function App() {
 
   return (
     <main className="login-page">
-      <section className="branding-panel">
-        <div className="branding-content">
-          <img
-            src="/KalyanLogo/KalyanLogo.svg"
-            alt="Kalyan logo"
-            className="kalyan-logo"
-          />
-          <h1>LOGIN TO KALYAN</h1>
-          <p>
-            Unified authentication portal for multiple Kalyan applications.
-          </p>
-        </div>
-      </section>
-
       <section className="form-panel">
-        <form className="login-card" onSubmit={handleFrappeLogin}>
-          <h2>WELCOME BACK</h2>
-          <p className="subtitle">
-            Login with your portal credentials to access this web application
-          </p>
-
-          <label htmlFor="usr">Email or username</label>
-          <input
-            id="usr"
-            type="text"
-            placeholder="Enter your email"
-            value={usr}
-            onChange={(event) => setUsr(event.target.value)}
-            required
-          />
-
-          <label htmlFor="pwd">Password</label>
-          <input
-            id="pwd"
-            type="password"
-            placeholder="Enter your password"
-            value={pwd}
-            onChange={(event) => setPwd(event.target.value)}
-            required
-          />
-
-          <div className="form-row">
-            <label className="remember">
-              <input
-                type="checkbox"
-                checked={rememberMe}
-                onChange={(event) => setRememberMe(event.target.checked)}
-              />
-              Remember me
-            </label>
-            <a href="/forgot-password">Forgot Password</a>
-          </div>
-
-          {error ? <p className="error-text">{error}</p> : null}
-
-          <button className="login-btn" type="submit" disabled={loading}>
-            {loading ? 'Logging in...' : 'Login to Portal'}
-          </button>
-
-          <div className="divider">or</div>
-
-          <button
-            className="google-btn"
-            type="button"
-            onClick={() => {
-              const url =
-                import.meta.env.VITE_GOOGLE_AUTH_URL || '/api/method/google_login'
-              window.location.assign(url)
-            }}
-          >
-            Continue with Google
-          </button>
-        </form>
+        <div className="login-card">
+          <h2>Redirecting</h2>
+          <p className="subtitle">Taking you to Frappe login...</p>
+        </div>
       </section>
     </main>
   )

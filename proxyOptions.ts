@@ -2,7 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
-/** Doppio / mint-style proxy to a local Frappe bench. See https://github.com/NagariaHussain/doppio */
+/** Vite dev proxy: forward Frappe paths to the local bench webserver port. */
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 function resolveWebserverPort(): string {

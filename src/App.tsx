@@ -1,17 +1,15 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { FrappeProvider, useFrappeAuth } from 'frappe-react-sdk'
 import {
   getCurrentUserLabel,
   isKeycloakAuthenticated,
   loginWithKeycloak,
   logoutFromKeycloak,
 } from './keycloakAuth'
-import {
-  getFrappeLoginRedirectUrl,
-  getFrappeSessionUser,
-  logoutFromFrappe,
-} from './frappeAuth'
+import { getFrappeLoginRedirectUrl } from './frappeAuth'
 import { isDemoMode } from './demoMode'
+import { resolveFrappeEnableSocket, resolveFrappeProviderUrl } from './frappeSdk'
 import {
   getMaintenanceInfo,
   isMaintenanceMode,
@@ -99,49 +97,22 @@ const users: UserRow[] = Array.from({ length: 10 }, (_, index) => ({
   locationRights: 'Dubai Gold Souk',
 }))
 
-function App() {
+function PortalApp() {
   const demo = isDemoMode()
-  const [isFrappeAuthenticated, setIsFrappeAuthenticated] = useState(demo)
+  const {
+    currentUser,
+    isLoading: frappeAuthLoading,
+    logout: logoutFrappeSession,
+  } = useFrappeAuth()
+  const isFrappeAuthenticated = demo || Boolean(currentUser)
   const [hasKeycloakSession, setHasKeycloakSession] = useState(
     demo || isKeycloakAuthenticated(),
   )
-  const [checkingFrappeSession, setCheckingFrappeSession] = useState(!demo)
+  const checkingFrappeSession = !demo && frappeAuthLoading
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
   const [search, setSearch] = useState('')
-
-  useEffect(() => {
-    if (demo) {
-      return
-    }
-
-    let mounted = true
-
-    async function bootstrapFrappeSession() {
-      try {
-        const loggedInUser = await getFrappeSessionUser()
-        if (!mounted) {
-          return
-        }
-        setIsFrappeAuthenticated(Boolean(loggedInUser))
-      } catch {
-        if (!mounted) {
-          return
-        }
-        setIsFrappeAuthenticated(false)
-      } finally {
-        if (mounted) {
-          setCheckingFrappeSession(false)
-        }
-      }
-    }
-
-    void bootstrapFrappeSession()
-    return () => {
-      mounted = false
-    }
-  }, [demo])
 
   useEffect(() => {
     if (demo || checkingFrappeSession || isFrappeAuthenticated) {
@@ -203,7 +174,7 @@ function App() {
       return
     }
     try {
-      await logoutFromFrappe()
+      await logoutFrappeSession()
     } catch {
       // Ignore logout API errors and continue local cleanup.
     }
@@ -213,7 +184,6 @@ function App() {
       // Ignore Keycloak redirect errors and continue local cleanup.
     }
     setHasKeycloakSession(false)
-    setIsFrappeAuthenticated(false)
     setActiveMenu('applications')
   }
 
@@ -572,6 +542,20 @@ function App() {
         </div>
       </section>
     </main>
+  )
+}
+
+function App() {
+  return (
+    <FrappeProvider
+      url={resolveFrappeProviderUrl()}
+      swrConfig={{ errorRetryCount: 2 }}
+      socketPort={import.meta.env.VITE_SOCKET_PORT}
+      siteName={import.meta.env.VITE_SITE_NAME}
+      enableSocket={resolveFrappeEnableSocket()}
+    >
+      <PortalApp />
+    </FrappeProvider>
   )
 }
 

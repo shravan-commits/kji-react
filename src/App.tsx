@@ -1,10 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { FormEvent } from 'react'
-import {
-  FrappeProvider,
-  useFrappeAuth,
-  useFrappeGetDocList,
-} from 'frappe-react-sdk'
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { FrappeProvider, useFrappeGetDocList } from 'frappe-react-sdk'
 import {
   getCurrentUserDisplayName,
   getCurrentUserLabel,
@@ -13,7 +9,6 @@ import {
   loginWithKeycloak,
   logoutFromKeycloak,
 } from './keycloakAuth'
-import { getFrappeLoginRedirectUrl } from './frappeAuth'
 import { resolveFrappeEnableSocket, resolveFrappeProviderUrl } from './frappeSdk'
 import {
   getMaintenanceInfo,
@@ -23,6 +18,9 @@ import {
 } from './portalState'
 import { FullMaintenanceView, NoAccessView } from './portalViews'
 import './style.css'
+
+/** Dashboard URL after Keycloak sign-in. */
+const APPLICATIONS_PATH = '/applications' as const
 
 type MenuKey = 'applications' | 'users'
 
@@ -101,16 +99,9 @@ type FrappeUserDoc = {
 }
 
 function PortalApp() {
-  const {
-    currentUser,
-    isLoading: frappeAuthLoading,
-    logout: logoutFrappeSession,
-  } = useFrappeAuth()
-  const isFrappeAuthenticated = Boolean(currentUser)
-  const [hasKeycloakSession, setHasKeycloakSession] = useState(
-    isKeycloakAuthenticated(),
-  )
-  const checkingFrappeSession = frappeAuthLoading
+  const navigate = useNavigate()
+  const location = useLocation()
+  const [authRevision, setAuthRevision] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
@@ -144,24 +135,22 @@ function PortalApp() {
   }))
 
   useEffect(() => {
-    if (checkingFrappeSession || isFrappeAuthenticated) {
+    if (!isKeycloakAuthenticated()) {
       return
     }
-    window.location.assign(getFrappeLoginRedirectUrl())
-  }, [checkingFrappeSession, isFrappeAuthenticated])
+    if (location.pathname !== APPLICATIONS_PATH) {
+      navigate(APPLICATIONS_PATH, { replace: true })
+    }
+  }, [location.pathname, navigate, authRevision])
 
-  const handleKeycloakLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
+  const handleLoginWithKeycloak = async () => {
     setError('')
     setLoading(true)
-
     try {
       await loginWithKeycloak()
-      setHasKeycloakSession(true)
     } catch (e) {
-      const message = e instanceof Error ? e.message : 'Keycloak login failed.'
+      const message = e instanceof Error ? e.message : 'Could not open Keycloak login.'
       setError(message)
-    } finally {
       setLoading(false)
     }
   }
@@ -179,10 +168,8 @@ function PortalApp() {
     !maintenance &&
     (isNoAccessForced() || availableApplications.length === 0)
 
-  const sessionEmail =
-    getCurrentUserLabel() || (typeof currentUser === 'string' ? currentUser : undefined)
-  const displayName =
-    getCurrentUserDisplayName() || (typeof currentUser === 'string' ? currentUser : '') || 'User'
+  const sessionEmail = getCurrentUserLabel()
+  const displayName = getCurrentUserDisplayName() || 'User'
   const noAccessProfile = resolveNoAccessProfile({
     sessionEmail,
     sessionName: displayName,
@@ -200,20 +187,15 @@ function PortalApp() {
   const handlePortalLogout = async () => {
     setError('')
     try {
-      await logoutFrappeSession()
-    } catch {
-      // Ignore logout API errors and continue local cleanup.
-    }
-    try {
       await logoutFromKeycloak()
     } catch {
       // Ignore Keycloak redirect errors and continue local cleanup.
     }
-    setHasKeycloakSession(false)
+    setAuthRevision((n) => n + 1)
     setActiveMenu('applications')
   }
 
-  if (isFrappeAuthenticated && hasKeycloakSession) {
+  if (isKeycloakAuthenticated()) {
     return (
       <main className="portal-layout">
         <aside className="sidebar">
@@ -291,7 +273,7 @@ function PortalApp() {
                 <img src="/UserIcon.svg" alt="Profile" className="profile-avatar" />
                 <div className="profile-details">
                   <strong>{displayName}</strong>
-                  <span>{sessionEmail || currentUser || ''}</span>
+                  <span>{sessionEmail || ''}</span>
                 </div>
               </div>
             </div>
@@ -520,7 +502,7 @@ function PortalApp() {
     )
   }
 
-  if (isFrappeAuthenticated && !isKeycloakConfigured()) {
+  if (!isKeycloakConfigured()) {
     return (
       <main className="login-page">
         <section className="form-panel">
@@ -537,7 +519,7 @@ function PortalApp() {
     )
   }
 
-  if (isFrappeAuthenticated) {
+  if (!isKeycloakAuthenticated()) {
     return (
       <main className="login-page">
         <section className="branding-panel">
@@ -549,54 +531,36 @@ function PortalApp() {
             />
             <h1>UNIFIED ACCESS</h1>
             <p>
-              Complete Keycloak sign-in to access all integrated applications without
-              additional logins.
+              Continue to Keycloak to sign in. After a successful login you will return to
+              this portal at <strong>/applications</strong>.
             </p>
           </div>
         </section>
 
         <section className="form-panel">
-          <form className="login-card" onSubmit={handleKeycloakLogin}>
+          <div className="login-card">
             <h2>KEYCLOAK LOGIN</h2>
             <p className="subtitle">
-              This step enables single sign-on for all applications listed inside this
-              portal.
+              Use your organization&apos;s Keycloak page to enter your credentials.
             </p>
 
             {error ? <p className="error-text">{error}</p> : null}
 
-            <button className="login-btn" type="submit" disabled={loading}>
-              {loading ? 'Logging in...' : 'Continue with Keycloak'}
+            <button
+              className="login-btn"
+              type="button"
+              disabled={loading}
+              onClick={() => void handleLoginWithKeycloak()}
+            >
+              {loading ? 'Redirecting...' : 'Login with Keycloak'}
             </button>
-          </form>
-        </section>
-      </main>
-    )
-  }
-
-  if (checkingFrappeSession) {
-    return (
-      <main className="login-page">
-        <section className="form-panel">
-          <div className="login-card">
-            <h2>Loading</h2>
-            <p className="subtitle">Checking your portal session...</p>
           </div>
         </section>
       </main>
     )
   }
 
-  return (
-    <main className="login-page">
-      <section className="form-panel">
-        <div className="login-card">
-          <h2>Redirecting</h2>
-          <p className="subtitle">Taking you to Frappe login...</p>
-        </div>
-      </section>
-    </main>
-  )
+  return null
 }
 
 function App() {
@@ -608,7 +572,11 @@ function App() {
       siteName={import.meta.env.VITE_SITE_NAME}
       enableSocket={resolveFrappeEnableSocket()}
     >
-      <PortalApp />
+      <Routes>
+        <Route path="/application" element={<Navigate to={APPLICATIONS_PATH} replace />} />
+        <Route path={APPLICATIONS_PATH} element={<PortalApp />} />
+        <Route path="/*" element={<PortalApp />} />
+      </Routes>
     </FrappeProvider>
   )
 }

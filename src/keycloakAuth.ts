@@ -1,7 +1,16 @@
 import Keycloak from 'keycloak-js'
+import type { KeycloakTokenParsed } from 'keycloak-js'
 
 type KeycloakInitResult = {
   authenticated: boolean
+}
+
+type TokenEndpointResponse = {
+  access_token: string
+  refresh_token?: string
+  id_token?: string
+  error?: string
+  error_description?: string
 }
 
 type KeycloakConfig = {
@@ -10,8 +19,23 @@ type KeycloakConfig = {
   clientId: string
 }
 
+/**
+ * URL Keycloak redirects to after successful login (must exactly match a "Valid redirect URI"
+ * on the Keycloak client — use http://localhost:5173/applications for local Vite dev).
+ */
+export function resolveKeycloakLoginRedirectUri() {
+  const fromEnv = import.meta.env.VITE_KEYCLOAK_REDIRECT_URI?.trim()
+  if (fromEnv) {
+    return fromEnv.replace(/\/+$/, '')
+  }
+  if (import.meta.env.DEV) {
+    return 'http://localhost:5173/applications'
+  }
+  return `${window.location.origin.replace(/\/+$/, '')}/applications`
+}
+
 function resolveRedirectUri() {
-  return import.meta.env.VITE_KEYCLOAK_REDIRECT_URI?.trim() || window.location.origin
+  return resolveKeycloakLoginRedirectUri()
 }
 
 function resolvePostLogoutRedirectUri() {
@@ -21,8 +45,23 @@ function resolvePostLogoutRedirectUri() {
   )
 }
 
+/**
+ * Keycloak origin (no trailing slash). In dev, defaults to docker-compose port 8081
+ * so "Login with Keycloak" hits http://localhost:8081/... even if VITE_KEYCLOAK_URL is unset.
+ */
+function resolveKeycloakServerOrigin(): string | undefined {
+  const explicit = import.meta.env.VITE_KEYCLOAK_URL?.trim().replace(/\/+$/, '')
+  if (explicit) {
+    return explicit
+  }
+  if (import.meta.env.DEV) {
+    return 'http://localhost:8081'
+  }
+  return undefined
+}
+
 function getKeycloakConfig(): KeycloakConfig | null {
-  const url = import.meta.env.VITE_KEYCLOAK_URL?.trim()
+  const url = resolveKeycloakServerOrigin()
   const realm = import.meta.env.VITE_KEYCLOAK_REALM?.trim()
   const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID?.trim()
   if (!url || !realm || !clientId) {
@@ -38,46 +77,184 @@ export function isKeycloakConfigured(): boolean {
 
 let keycloak: Keycloak | null = null
 
+/** Fields used at runtime but omitted from published .d.ts. */
+type KeycloakRuntime = Keycloak & {
+  tokenTimeoutHandle?: number
+  endpoints: { token: () => string }
+}
+
+function asRuntime(k: Keycloak | null): KeycloakRuntime | null {
+  return k as KeycloakRuntime | null
+}
+
 let keycloakInitialized = false
-let keycloakAuthenticated = false
 
 export async function initializeKeycloak(): Promise<KeycloakInitResult> {
   if (keycloakInitialized) {
-    return { authenticated: keycloakAuthenticated }
+    return { authenticated: Boolean(keycloak?.authenticated) }
   }
 
   const config = getKeycloakConfig()
   if (!config) {
     keycloakInitialized = true
-    keycloakAuthenticated = false
     return { authenticated: false }
   }
 
   keycloak = new Keycloak(config)
-  keycloakAuthenticated = await keycloak.init({
-    onLoad: 'check-sso',
+  // No `onLoad: 'check-sso'`: silent SSO would skip the "Login with Keycloak" landing page.
+  // redirectUri must match the authorize request so the callback on /applications exchanges the code.
+  await keycloak.init({
     pkceMethod: 'S256',
     checkLoginIframe: false,
+    redirectUri: resolveKeycloakLoginRedirectUri(),
   })
   keycloakInitialized = true
 
-  return { authenticated: keycloakAuthenticated }
+  return { authenticated: Boolean(keycloak.authenticated) }
 }
 
 export function isKeycloakAuthenticated() {
-  return keycloakAuthenticated
+  return Boolean(keycloak?.authenticated)
 }
 
 export async function loginWithKeycloak() {
-  if (!keycloak) {
+  if (!keycloak?.clientId) {
+    throw new Error(
+      'Keycloak is not configured. Set VITE_KEYCLOAK_URL (e.g. http://localhost:8081), VITE_KEYCLOAK_REALM, and VITE_KEYCLOAK_CLIENT_ID.',
+    )
+  }
+
+  const href = await keycloak.createLoginUrl({ redirectUri: resolveRedirectUri() })
+  window.location.assign(href)
+}
+
+function base64UrlDecode(input: string) {
+  let output = input.replaceAll('-', '+').replaceAll('_', '/')
+  switch (output.length % 4) {
+    case 0:
+      break
+    case 2:
+      output += '=='
+      break
+    case 3:
+      output += '='
+      break
+    default:
+      throw new Error('Invalid JWT payload length.')
+  }
+  try {
+    return decodeURIComponent(
+      atob(output).replace(/(.)/g, (_m, p: string) => {
+        const code = p.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')
+        return '%' + code
+      }),
+    )
+  } catch {
+    return atob(output)
+  }
+}
+
+function decodeJwt(token: string): KeycloakTokenParsed {
+  const parts = token.split('.')
+  const payload = parts[1]
+  if (typeof payload !== 'string') {
+    throw new Error('Invalid token.')
+  }
+  return JSON.parse(base64UrlDecode(payload)) as KeycloakTokenParsed
+}
+
+function applyTokenResponse(data: Pick<TokenEndpointResponse, 'access_token' | 'refresh_token' | 'id_token'>) {
+  const kc = asRuntime(keycloak)
+  if (!kc) {
+    return
+  }
+
+  if (kc.tokenTimeoutHandle) {
+    clearTimeout(kc.tokenTimeoutHandle)
+    kc.tokenTimeoutHandle = undefined
+  }
+
+  const timeLocal = Date.now()
+
+  if (data.refresh_token) {
+    kc.refreshToken = data.refresh_token
+    kc.refreshTokenParsed = decodeJwt(data.refresh_token)
+  } else {
+    delete kc.refreshToken
+    delete kc.refreshTokenParsed
+  }
+
+  if (data.id_token) {
+    kc.idToken = data.id_token
+    kc.idTokenParsed = decodeJwt(data.id_token)
+  } else {
+    delete kc.idToken
+    delete kc.idTokenParsed
+  }
+
+  kc.token = data.access_token
+  kc.tokenParsed = decodeJwt(data.access_token)
+  kc.sessionId = kc.tokenParsed.sid as string | undefined
+  kc.authenticated = true
+  kc.subject = kc.tokenParsed.sub
+  kc.realmAccess = kc.tokenParsed.realm_access
+  kc.resourceAccess = kc.tokenParsed.resource_access
+  kc.timeSkew = Math.floor(timeLocal / 1000) - (kc.tokenParsed.iat ?? 0)
+
+  if (kc.onTokenExpired && kc.tokenParsed.exp != null) {
+    const expiresIn =
+      (kc.tokenParsed.exp - Date.now() / 1000 + (kc.timeSkew ?? 0)) * 1000
+    if (expiresIn > 0) {
+      kc.tokenTimeoutHandle = window.setTimeout(() => {
+        asRuntime(keycloak)?.onTokenExpired?.()
+      }, expiresIn)
+    } else {
+      kc.onTokenExpired()
+    }
+  }
+}
+
+/**
+ * Sign in with username/password inside this SPA (no redirect to Keycloak UI).
+ * Requires the client to have **Direct access grants** enabled, **Web origins** to include
+ * this app’s origin, and (for most setups) a **public** client.
+ */
+export async function loginWithKeycloakPassword(username: string, password: string) {
+  const kc = asRuntime(keycloak)
+  if (!kc?.clientId) {
     throw new Error(
       'Keycloak is not configured. Set VITE_KEYCLOAK_URL, VITE_KEYCLOAK_REALM, and VITE_KEYCLOAK_CLIENT_ID.',
     )
   }
 
-  await keycloak.login({
-    redirectUri: resolveRedirectUri(),
+  const tokenUrl = kc.endpoints.token()
+  const body = new URLSearchParams({
+    grant_type: 'password',
+    client_id: kc.clientId,
+    username: username.trim(),
+    password,
+    scope: 'openid',
   })
+
+  const response = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    },
+    body: body.toString(),
+  })
+
+  const data = (await response.json()) as TokenEndpointResponse
+
+  if (!response.ok) {
+    throw new Error(
+      data.error_description || data.error || `Keycloak login failed (${response.status}).`,
+    )
+  }
+
+  applyTokenResponse(data)
+  kc.onAuthSuccess?.()
 }
 
 export async function logoutFromKeycloak() {

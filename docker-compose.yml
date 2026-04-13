@@ -1,31 +1,193 @@
-# Loads variables from a .env file in this directory (for build args).
-# Create .env from .env.example, then:
-#   docker compose build
-#   docker compose up -d
+# =============================================================================
+# Kalyan Auth — local ERPNext + Keycloak (pairs with the Vite UI and root .env)
+# =============================================================================
+# Published ports (host):
+#   8080  ERPNext / Frappe HTTP (nginx)  → VITE_FRAPPE_BASE_URL=http://localhost:8080
+#   8081  Keycloak (dev mode)           → VITE_KEYCLOAK_URL=http://localhost:8081
+#         Realm "kalyan" + client "kalyan" are imported from docker/kalyan-realm.json .
+#         If login still 404s, recreate: docker compose up -d --force-recreate keycloak
 #
-# Or override: docker compose build --build-arg VITE_FRAPPE_BASE_URL=https://...
+# React app (npm run dev): http://localhost:5173
+#   → Keycloak login first, then Frappe if needed, then /applications
+#
+# Set FRAPPE_WEBSERVER_PORT=8080 in .env so Vite proxies /api to this stack.
+# Create a Keycloak realm + public client with Direct access grants for the SPA.
+# Default Keycloak admin (dev): admin / admin (change for anything non-local).
+# =============================================================================
 
 services:
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VITE_FRAPPE_URL: ${VITE_FRAPPE_URL:-}
-        VITE_FRAPPE_BASE_URL: ${VITE_FRAPPE_BASE_URL:-}
-        VITE_FRAPPE_LOGIN_URL: ${VITE_FRAPPE_LOGIN_URL:-}
-        VITE_FRAPPE_ENABLE_SOCKET: ${VITE_FRAPPE_ENABLE_SOCKET:-}
-        VITE_SOCKET_PORT: ${VITE_SOCKET_PORT:-}
-        VITE_SITE_NAME: ${VITE_SITE_NAME:-}
-        VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-}
-        VITE_KEYCLOAK_REALM: ${VITE_KEYCLOAK_REALM:-}
-        VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-}
-        VITE_KEYCLOAK_REDIRECT_URI: ${VITE_KEYCLOAK_REDIRECT_URI:-}
-        VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI: ${VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI:-}
-        VITE_APP_HR_URL: ${VITE_APP_HR_URL:-}
-        VITE_APP_WAREHOUSE_URL: ${VITE_APP_WAREHOUSE_URL:-}
-        VITE_APP_SALES_URL: ${VITE_APP_SALES_URL:-}
-        VITE_APP_FINANCE_URL: ${VITE_APP_FINANCE_URL:-}
+
+  mariadb:
+    image: mariadb:10.6
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: mysqladmin ping -h localhost --password=root
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks:
+      - frappe_net
+
+  redis-cache:
+    image: redis:7
+    restart: always
+    networks:
+      - frappe_net
+
+  redis-queue:
+    image: redis:7
+    restart: always
+    networks:
+      - frappe_net
+
+  redis-socketio:
+    image: redis:7
+    restart: always
+    networks:
+      - frappe_net
+
+  # Writes sites/common_site_config.json so gunicorn + socketio see Redis/DB (not 127.0.0.1 defaults).
+  configurator:
+    image: frappe/erpnext:v14.82.2
+    restart: no
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+      redis-socketio:
+        condition: service_started
+    entrypoint:
+      - bash
+      - -lc
+    command:
+      - |
+        set -e
+        mkdir -p sites
+        ls -1 apps > sites/apps.txt
+        bench set-config -g db_host $$DB_HOST
+        bench set-config -gp db_port $$DB_PORT
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE"
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE"
+        bench set-config -g redis_socketio "redis://$$REDIS_SOCKETIO"
+        bench set-config -gp socketio_port $$SOCKETIO_PORT
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      REDIS_SOCKETIO: redis-socketio:6379
+      SOCKETIO_PORT: "9000"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - assets:/home/frappe/frappe-bench/sites/assets
+    networks:
+      - frappe_net
+
+  frappe:
+    image: frappe/erpnext:v14.82.2
+    restart: always
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+      redis-socketio:
+        condition: service_started
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      MYSQL_ROOT_PASSWORD: root
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      REDIS_SOCKETIO: redis-socketio:6379
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - assets:/home/frappe/frappe-bench/sites/assets
+    networks:
+      - frappe_net
+
+  # Realtime (Socket.IO). Nginx frontend proxies /socket.io here — same pattern as frappe_docker.
+  websocket:
+    image: frappe/erpnext:v14.82.2
+    restart: always
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      frappe:
+        condition: service_started
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - assets:/home/frappe/frappe-bench/sites/assets
+    networks:
+      - frappe_net
+
+  # frappe/nginx:* tags are no longer published; official stacks use erpnext + nginx-entrypoint.
+  nginx:
+    image: frappe/erpnext:v14.82.2
+    restart: always
     ports:
-      - "${DOCKER_WEB_PORT:-8080}:80"
-    restart: unless-stopped
+      - "8080:8080"
+    depends_on:
+      - frappe
+      - websocket
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: frappe:8000
+      SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-localhost}
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: "120"
+      CLIENT_MAX_BODY_SIZE: 50m
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - assets:/home/frappe/frappe-bench/sites/assets
+    networks:
+      - frappe_net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    # Imports docker/kalyan-realm.json on first start so /realms/kalyan/... exists (fixes "Page not found").
+    command: start-dev --import-realm
+    restart: always
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./docker/kalyan-realm.json:/opt/keycloak/data/import/kalyan-realm.json:ro
+    networks:
+      - frappe_net
+
+volumes:
+  mariadb_data:
+  sites:
+  assets:
+
+networks:
+  frappe_net:

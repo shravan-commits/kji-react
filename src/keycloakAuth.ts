@@ -19,6 +19,11 @@ type KeycloakConfig = {
   clientId: string
 }
 
+function normalizeEnvValue(value: string | undefined) {
+  const trimmed = value?.trim()
+  return trimmed && trimmed.length > 0 ? trimmed : undefined
+}
+
 /**
  * URL Keycloak redirects to after successful login (must exactly match a "Valid redirect URI"
  * on the Keycloak client — use http://localhost:5173/applications for local Vite dev).
@@ -50,20 +55,20 @@ function resolvePostLogoutRedirectUri() {
  * so "Login with Keycloak" hits http://localhost:8081/... even if VITE_KEYCLOAK_URL is unset.
  */
 function resolveKeycloakServerOrigin(): string | undefined {
-  const explicit = import.meta.env.VITE_KEYCLOAK_URL?.trim().replace(/\/+$/, '')
+  const explicit = normalizeEnvValue(import.meta.env.VITE_KEYCLOAK_URL)?.replace(/\/+$/, '')
   if (explicit) {
     return explicit
   }
   if (import.meta.env.DEV) {
-    return 'http://localhost:8081'
+    return 'http://localhost:8080'
   }
   return undefined
 }
 
 function getKeycloakConfig(): KeycloakConfig | null {
   const url = resolveKeycloakServerOrigin()
-  const realm = import.meta.env.VITE_KEYCLOAK_REALM?.trim()
-  const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID?.trim()
+  const realm = normalizeEnvValue(import.meta.env.VITE_KEYCLOAK_REALM)
+  const clientId = normalizeEnvValue(import.meta.env.VITE_KEYCLOAK_CLIENT_ID)
   if (!url || !realm || !clientId) {
     return null
   }
@@ -118,10 +123,27 @@ export function isKeycloakAuthenticated() {
 }
 
 export async function loginWithKeycloak() {
-  if (!keycloak?.clientId) {
+  const config = getKeycloakConfig()
+  if (!config) {
     throw new Error(
       'Keycloak is not configured. Set VITE_KEYCLOAK_URL (e.g. http://localhost:8081), VITE_KEYCLOAK_REALM, and VITE_KEYCLOAK_CLIENT_ID.',
     )
+  }
+
+  // In dev, HMR can preserve module state; recreate client if env-backed config changed.
+  if (
+    !keycloak ||
+    keycloak.clientId !== config.clientId ||
+    keycloak.authServerUrl !== config.url ||
+    keycloak.realm !== config.realm
+  ) {
+    keycloak = new Keycloak(config)
+    await keycloak.init({
+      pkceMethod: 'S256',
+      checkLoginIframe: false,
+      redirectUri: resolveKeycloakLoginRedirectUri(),
+    })
+    keycloakInitialized = true
   }
 
   const href = await keycloak.createLoginUrl({ redirectUri: resolveRedirectUri() })

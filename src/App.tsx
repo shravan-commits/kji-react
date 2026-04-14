@@ -9,7 +9,11 @@ import {
   loginWithKeycloak,
   logoutFromKeycloak,
 } from './keycloakAuth'
-import { resolveFrappeEnableSocket, resolveFrappeProviderUrl } from './frappeSdk'
+import {
+  resolveFrappeEnableSocket,
+  resolveFrappeProviderUrl,
+  resolveFrappeTokenParams,
+} from './frappeSdk'
 import {
   getMaintenanceInfo,
   isMaintenanceMode,
@@ -121,7 +125,11 @@ function PortalApp() {
       orderBy: { field: 'full_name', order: 'asc' },
     },
     userListSwrKey,
-    { revalidateOnFocus: false, shouldRetryOnError: false },
+    {
+      revalidateOnFocus: true,
+      shouldRetryOnError: false,
+      refreshInterval: activeMenu === 'users' ? 5000 : 0,
+    },
   )
 
   const users: UserRow[] = (userDocs ?? []).map((u) => ({
@@ -567,6 +575,7 @@ function App() {
   return (
     <FrappeProvider
       url={resolveFrappeProviderUrl()}
+      tokenParams={resolveFrappeTokenParams()}
       swrConfig={{ errorRetryCount: 2 }}
       socketPort={import.meta.env.VITE_SOCKET_PORT}
       siteName={import.meta.env.VITE_SITE_NAME}

@@ -24,9 +24,14 @@ interface ImportMetaEnv {
   readonly VITE_KEYCLOAK_REDIRECT_URI?: string
   readonly VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI?: string
   readonly VITE_APP_HR_URL?: string
+  readonly VITE_APP_HR_REQUIRED_ROLES?: string
   readonly VITE_APP_WAREHOUSE_URL?: string
+  readonly VITE_APP_WAREHOUSE_REQUIRED_ROLES?: string
   readonly VITE_APP_SALES_URL?: string
+  readonly VITE_APP_SALES_REQUIRED_ROLES?: string
   readonly VITE_APP_FINANCE_URL?: string
+  readonly VITE_APP_FINANCE_REQUIRED_ROLES?: string
+  readonly VITE_USER_LIST_REQUIRED_ROLES?: string
 }
 
 interface ImportMeta {

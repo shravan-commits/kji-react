@@ -4,10 +4,14 @@ import { FrappeProvider, useFrappeGetDocList } from 'frappe-react-sdk'
 import {
   getCurrentUserDisplayName,
   getCurrentUserLabel,
+  hasCurrentUserAnyRole,
+  isCentralPortalReachable,
   isKeycloakAuthenticated,
   isKeycloakConfigured,
+  isKeycloakUnavailableError,
   loginWithKeycloak,
   logoutFromKeycloak,
+  resolveRequiredRoles,
 } from './keycloakAuth'
 import {
   resolveFrappeEnableSocket,
@@ -20,7 +24,11 @@ import {
   isNoAccessForced,
   resolveNoAccessProfile,
 } from './portalState'
-import { FullMaintenanceView, NoAccessView } from './portalViews'
+import {
+  CentralPortalUnavailableView,
+  FullMaintenanceView,
+  NoAccessView,
+} from './portalViews'
 import './style.css'
 
 /** Dashboard URL after Keycloak sign-in. */
@@ -35,6 +43,7 @@ type ApplicationCard = {
   status: 'active' | 'inactive'
   description: string
   launchUrl?: string
+  requiredRoles?: string[]
 }
 
 type UserRow = {
@@ -54,6 +63,7 @@ const applications: ApplicationCard[] = [
     status: 'active',
     description: 'Advanced predictive modeling and data visualization for supply chain management.',
     launchUrl: import.meta.env.VITE_APP_HR_URL,
+    requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_HR_REQUIRED_ROLES),
   },
   {
     id: 2,
@@ -62,6 +72,7 @@ const applications: ApplicationCard[] = [
     status: 'active',
     description: 'Manage inventory movement, stock health, and warehouse operations from one panel.',
     launchUrl: import.meta.env.VITE_APP_WAREHOUSE_URL,
+    requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_WAREHOUSE_REQUIRED_ROLES),
   },
   {
     id: 3,
@@ -70,6 +81,7 @@ const applications: ApplicationCard[] = [
     status: 'active',
     description: 'Track opportunities, customer conversion, and regional sales performance in real time.',
     launchUrl: import.meta.env.VITE_APP_SALES_URL,
+    requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_SALES_REQUIRED_ROLES),
   },
   {
     id: 4,
@@ -85,6 +97,7 @@ const applications: ApplicationCard[] = [
     status: 'active',
     description: 'Control payables, receivables, approvals, and key financial indicators.',
     launchUrl: import.meta.env.VITE_APP_FINANCE_URL,
+    requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_FINANCE_REQUIRED_ROLES),
   },
   {
     id: 6,
@@ -94,6 +107,10 @@ const applications: ApplicationCard[] = [
     description: 'This application is currently inactive and not available for use.',
   },
 ]
+
+const usersRequiredRoles = resolveRequiredRoles(
+  import.meta.env.VITE_USER_LIST_REQUIRED_ROLES || 'System Manager',
+)
 
 type FrappeUserDoc = {
   name: string
@@ -108,10 +125,32 @@ function PortalApp() {
   const [authRevision, setAuthRevision] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [portalUnavailable, setPortalUnavailable] = useState(false)
+  const [appAccessDenied, setAppAccessDenied] = useState<string | null>(null)
   const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
   const [search, setSearch] = useState('')
+  const keycloakAuthError = (() => {
+    const searchParams = new URLSearchParams(location.search)
+    const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''))
+    const error =
+      searchParams.get('error') || hashParams.get('error') || ''
+    const description =
+      searchParams.get('error_description') ||
+      hashParams.get('error_description') ||
+      ''
+    return {
+      error: error.trim().toLowerCase(),
+      description: description.trim().toLowerCase(),
+    }
+  })()
+  const isClientUnavailableError =
+    keycloakAuthError.error.includes('client') ||
+    keycloakAuthError.error.includes('unauthorized_client') ||
+    keycloakAuthError.description.includes('client') ||
+    keycloakAuthError.description.includes('disabled')
 
-  const userListSwrKey = activeMenu === 'users' ? undefined : null
+  const canViewUserList = hasCurrentUserAnyRole(usersRequiredRoles)
+  const userListSwrKey = activeMenu === 'users' && canViewUserList ? undefined : null
   const {
     data: userDocs,
     isLoading: usersListLoading,
@@ -151,30 +190,80 @@ function PortalApp() {
     }
   }, [location.pathname, navigate, authRevision])
 
+  useEffect(() => {
+    if (!isKeycloakConfigured() || isKeycloakAuthenticated()) {
+      return
+    }
+    if (isClientUnavailableError) {
+      setPortalUnavailable(true)
+      return
+    }
+    let active = true
+    void isCentralPortalReachable().then((reachable) => {
+      if (!active) {
+        return
+      }
+      setPortalUnavailable(!reachable)
+    })
+    return () => {
+      active = false
+    }
+  }, [authRevision, isClientUnavailableError])
+
   const handleLoginWithKeycloak = async () => {
     setError('')
+    setPortalUnavailable(false)
     setLoading(true)
     try {
+      const reachable = await isCentralPortalReachable()
+      if (!reachable) {
+        setPortalUnavailable(true)
+        setLoading(false)
+        return
+      }
       await loginWithKeycloak()
     } catch (e) {
+      if (isKeycloakUnavailableError(e)) {
+        setPortalUnavailable(true)
+      }
       const message = e instanceof Error ? e.message : 'Could not open Keycloak login.'
       setError(message)
       setLoading(false)
     }
   }
 
+  const handleRetryPortalConnection = async () => {
+    setError('')
+    setLoading(true)
+    const reachable = await isCentralPortalReachable()
+    setPortalUnavailable(!reachable)
+    setLoading(false)
+  }
+
   const openApplication = (app: ApplicationCard) => {
     if (!app.launchUrl || app.status !== 'active') {
       return
     }
+    if (!hasCurrentUserAnyRole(app.requiredRoles || [])) {
+      setAppAccessDenied(app.name)
+      return
+    }
+    setAppAccessDenied(null)
     window.open(app.launchUrl, '_blank', 'noopener,noreferrer')
   }
 
   const maintenance = isMaintenanceMode()
   const availableApplications = applications.filter((app) => app.status === 'active')
+  const noAccessFromQuery = (() => {
+    const value = new URLSearchParams(location.search).get('no_access')?.toLowerCase()
+    return value === '1' || value === 'true' || value === 'yes'
+  })()
   const noAccess =
     !maintenance &&
-    (isNoAccessForced() || availableApplications.length === 0)
+    (isNoAccessForced() ||
+      noAccessFromQuery ||
+      Boolean(appAccessDenied) ||
+      availableApplications.length === 0)
 
   const sessionEmail = getCurrentUserLabel()
   const displayName = getCurrentUserDisplayName() || 'User'
@@ -201,6 +290,14 @@ function PortalApp() {
     }
     setAuthRevision((n) => n + 1)
     setActiveMenu('applications')
+  }
+
+  const handleBackToApplicationsDashboard = () => {
+    setActiveMenu('applications')
+    setAppAccessDenied(null)
+    if (location.search) {
+      navigate(APPLICATIONS_PATH, { replace: true })
+    }
   }
 
   if (isKeycloakAuthenticated()) {
@@ -290,14 +387,29 @@ function PortalApp() {
           {maintenance ? (
             <FullMaintenanceView
               info={maintenanceInfo}
-              onBackToPortal={() => setActiveMenu('applications')}
+              onBackToPortal={handleBackToApplicationsDashboard}
             />
           ) : null}
 
           {!maintenance && activeMenu === 'applications' && noAccess ? (
             <NoAccessView
               profile={noAccessProfile}
-              onBackToPortal={() => setActiveMenu('applications')}
+              title={appAccessDenied ? 'No Rights' : undefined}
+              lead={
+                appAccessDenied
+                  ? `You do not have permission to access ${appAccessDenied}. Please contact your administrator to assign the required Keycloak roles.`
+                  : noAccessFromQuery
+                  ? 'We could not complete sign-in to the selected application. Please contact your administrator to verify access permissions and SSO configuration.'
+                  : undefined
+              }
+              statusLabel={
+                appAccessDenied
+                  ? 'Application Access Denied'
+                  : noAccessFromQuery
+                    ? 'Application Access Failed'
+                    : undefined
+              }
+              onBackToPortal={handleBackToApplicationsDashboard}
               onLogout={handlePortalLogout}
             />
           ) : null}
@@ -397,113 +509,125 @@ function PortalApp() {
           ) : null}
 
           {!maintenance && activeMenu === 'users' ? (
-            <section className="view-wrap">
-              <h1>Our Users</h1>
-              <p className="view-subtitle">
-                Access detailed information and manage user records seamlessly.
-              </p>
-              <div className="table-toolbar">
-                <h2>
-                  User List <span>({filteredUsers.length})</span>
-                </h2>
-                <div className="toolbar-filters">
-                  <div className="search-pill">
-                    <input
-                      className="search-pill-input"
-                      type="search"
-                      placeholder="Search user"
-                      value={search}
-                      onChange={(event) => setSearch(event.target.value)}
-                      aria-label="Search users"
-                    />
-                    <button
-                      type="button"
-                      className="search-pill-action"
-                      aria-label="Search"
-                    >
-                      <img src="/searchButton.svg" width={30} height={30} alt="" />
+            !canViewUserList ? (
+              <NoAccessView
+                profile={noAccessProfile}
+                title="No Rights"
+                lead="You do not have permission to access the Users section. Please contact your administrator to assign the required Keycloak role."
+                statusLabel="Users Access Denied"
+                onBackToPortal={handleBackToApplicationsDashboard}
+                onLogout={handlePortalLogout}
+              />
+            ) : usersListError ? (
+              <NoAccessView
+                profile={noAccessProfile}
+                title="No Rights"
+                lead="We could not validate your access to the Users section right now. Please contact your administrator to verify your permissions and integration settings."
+                statusLabel="Access Validation Failed"
+                onBackToPortal={handleBackToApplicationsDashboard}
+                onLogout={handlePortalLogout}
+              />
+            ) : (
+              <section className="view-wrap">
+                <h1>Our Users</h1>
+                <p className="view-subtitle">
+                  Access detailed information and manage user records seamlessly.
+                </p>
+                <div className="table-toolbar">
+                  <h2>
+                    User List <span>({filteredUsers.length})</span>
+                  </h2>
+                  <div className="toolbar-filters">
+                    <div className="search-pill">
+                      <input
+                        className="search-pill-input"
+                        type="search"
+                        placeholder="Search user"
+                        value={search}
+                        onChange={(event) => setSearch(event.target.value)}
+                        aria-label="Search users"
+                      />
+                      <button
+                        type="button"
+                        className="search-pill-action"
+                        aria-label="Search"
+                      >
+                        <img src="/searchButton.svg" width={30} height={30} alt="" />
+                      </button>
+                    </div>
+                    <button type="button" className="sort-pill">
+                      <img
+                        src="/sortButton.svg"
+                        className="sort-pill-icon"
+                        width={30}
+                        height={30}
+                        alt=""
+                      />
+                      <span className="sort-pill-label">Sort by</span>
+                      <span className="sort-pill-chevron" aria-hidden>
+                        ▼
+                      </span>
                     </button>
                   </div>
-                  <button type="button" className="sort-pill">
-                    <img
-                      src="/sortButton.svg"
-                      className="sort-pill-icon"
-                      width={30}
-                      height={30}
-                      alt=""
-                    />
-                    <span className="sort-pill-label">Sort by</span>
-                    <span className="sort-pill-chevron" aria-hidden>
-                      ▼
-                    </span>
-                  </button>
                 </div>
-              </div>
-              <div className="table-card user-list-card">
-                <table className="user-list-table">
-                  <thead>
-                    <tr>
-                      <th>Portal UID</th>
-                      <th>Name</th>
-                      <th>Type</th>
-                      <th>Status</th>
-                      <th>Primary Location</th>
-                      <th>Location Rights</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {usersListLoading ? (
+                <div className="table-card user-list-card">
+                  <table className="user-list-table">
+                    <thead>
                       <tr>
-                        <td colSpan={7} className="user-list-status">
-                          Loading users…
-                        </td>
+                        <th>Portal UID</th>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Primary Location</th>
+                        <th>Location Rights</th>
+                        <th>Actions</th>
                       </tr>
-                    ) : null}
-                    {!usersListLoading && usersListError ? (
-                      <tr>
-                        <td colSpan={7} className="user-list-status user-list-error">
-                          Unable to load users. Ensure you have permission to read the User
-                          doctype on your Frappe site.
-                        </td>
-                      </tr>
-                    ) : null}
-                    {!usersListLoading && !usersListError
-                      ? filteredUsers.map((item) => (
-                          <tr key={item.id}>
-                            <td>{item.id}</td>
-                            <td>{item.name}</td>
-                            <td>
-                              <span className="pill muted">{item.type}</span>
-                            </td>
-                            <td>
-                              <span
-                                className={`pill ${item.status === 'ACTIVE' ? 'green' : 'muted'}`}
-                              >
-                                {item.status}
-                              </span>
-                            </td>
-                            <td>{item.primaryLocation}</td>
-                            <td>{item.locationRights}</td>
-                            <td>
-                              <button type="button" className="user-row-action">
-                                View
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      : null}
-                    {!usersListLoading && !usersListError && filteredUsers.length === 0 ? (
-                      <tr>
-                        <td colSpan={7} className="user-list-status">
-                          No users found.
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+                    </thead>
+                    <tbody>
+                      {usersListLoading ? (
+                        <tr>
+                          <td colSpan={7} className="user-list-status">
+                            Loading users…
+                          </td>
+                        </tr>
+                      ) : null}
+                      {!usersListLoading && !usersListError
+                        ? filteredUsers.map((item) => (
+                            <tr key={item.id}>
+                              <td>{item.id}</td>
+                              <td>{item.name}</td>
+                              <td>
+                                <span className="pill muted">{item.type}</span>
+                              </td>
+                              <td>
+                                <span
+                                  className={`pill ${item.status === 'ACTIVE' ? 'green' : 'muted'}`}
+                                >
+                                  {item.status}
+                                </span>
+                              </td>
+                              <td>{item.primaryLocation}</td>
+                              <td>{item.locationRights}</td>
+                              <td>
+                                <button type="button" className="user-row-action">
+                                  View
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        : null}
+                      {!usersListLoading && !usersListError && filteredUsers.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="user-list-status">
+                            No users found.
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )
           ) : null}
         </section>
       </main>
@@ -528,6 +652,20 @@ function PortalApp() {
   }
 
   if (!isKeycloakAuthenticated()) {
+    if (portalUnavailable) {
+      return (
+        <main className="portal-unavailable-shell">
+          <CentralPortalUnavailableView onRetry={handleRetryPortalConnection} />
+          {isClientUnavailableError ? (
+            <p className="subtitle">
+              Keycloak client is unavailable or disabled. Please contact your administrator.
+            </p>
+          ) : null}
+          {loading ? <p className="subtitle">Checking portal status...</p> : null}
+        </main>
+      )
+    }
+
     return (
       <main className="login-page">
         <section className="branding-panel">

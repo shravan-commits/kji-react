@@ -108,6 +108,10 @@ const applications: ApplicationCard[] = [
   },
 ]
 
+const usersRequiredRoles = resolveRequiredRoles(
+  import.meta.env.VITE_USER_LIST_REQUIRED_ROLES || 'System Manager',
+)
+
 type FrappeUserDoc = {
   name: string
   full_name?: string | null
@@ -145,7 +149,8 @@ function PortalApp() {
     keycloakAuthError.description.includes('client') ||
     keycloakAuthError.description.includes('disabled')
 
-  const userListSwrKey = activeMenu === 'users' ? undefined : null
+  const canViewUserList = hasCurrentUserAnyRole(usersRequiredRoles)
+  const userListSwrKey = activeMenu === 'users' && canViewUserList ? undefined : null
   const {
     data: userDocs,
     isLoading: usersListLoading,
@@ -504,7 +509,16 @@ function PortalApp() {
           ) : null}
 
           {!maintenance && activeMenu === 'users' ? (
-            usersListError ? (
+            !canViewUserList ? (
+              <NoAccessView
+                profile={noAccessProfile}
+                title="No Rights"
+                lead="You do not have permission to access the Users section. Please contact your administrator to assign the required Keycloak role."
+                statusLabel="Users Access Denied"
+                onBackToPortal={handleBackToApplicationsDashboard}
+                onLogout={handlePortalLogout}
+              />
+            ) : usersListError ? (
               <NoAccessView
                 profile={noAccessProfile}
                 title="No Rights"

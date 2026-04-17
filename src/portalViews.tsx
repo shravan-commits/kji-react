@@ -5,12 +5,18 @@ type NoAccessViewProps = {
   profile: NoAccessProfile
   onBackToPortal: () => void
   onLogout: () => void
+  title?: string
+  lead?: string
+  statusLabel?: string
 }
 
 export function NoAccessView({
   profile,
   onBackToPortal,
   onLogout,
+  title,
+  lead,
+  statusLabel,
 }: NoAccessViewProps) {
   const contactUrl = getAdminContactUrl()
 
@@ -27,11 +33,11 @@ export function NoAccessView({
           />
         </div>
         <h2 id="no-access-title" className="portal-state-heading">
-          No Access Available
+          {title || 'No Rights'}
         </h2>
         <p className="portal-state-lead">
-          You currently don&apos;t have access to any applications in the portal.
-          Please contact your administrator to get the necessary permissions assigned.
+          {lead ||
+            "You currently don't have rights to access any applications in the portal. Please contact your administrator to get the necessary permissions assigned."}
         </p>
         <div className="portal-state-card no-access-card">
           <dl className="portal-state-dl">
@@ -50,7 +56,7 @@ export function NoAccessView({
             <div className="portal-state-dl-row">
               <dt>Status</dt>
               <dd>
-                <span className="portal-state-status-bad">No Apps Assigned</span>
+                <span className="portal-state-status-bad">{statusLabel || 'No Apps Assigned'}</span>
               </dd>
             </div>
           </dl>
@@ -79,6 +85,45 @@ export function NoAccessView({
               Logout
             </button>
           </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+type CentralPortalUnavailableViewProps = {
+  onRetry: () => void
+}
+
+export function CentralPortalUnavailableView({
+  onRetry,
+}: CentralPortalUnavailableViewProps) {
+  return (
+    <section
+      className="portal-state-page maintenance-page"
+      aria-labelledby="portal-unavailable-title"
+    >
+      <div className="portal-state-stack">
+        <div className="portal-state-icon-ring maintenance-ring" aria-hidden>
+          <img
+            src="/maintenanceLogo.svg"
+            alt=""
+            className="portal-state-logo maintenance-logo"
+            width={134}
+            height={134}
+          />
+        </div>
+        <h2 id="portal-unavailable-title" className="portal-state-heading">
+          Portal Offline
+        </h2>
+        <p className="portal-state-lead">
+          The central portal (Keycloak) is currently unavailable. Please try again
+          after some time.
+        </p>
+        <div className="portal-state-actions">
+          <button type="button" className="portal-state-btn primary" onClick={onRetry}>
+            Retry Connection
+          </button>
         </div>
       </div>
     </section>

@@ -19,6 +19,15 @@ type KeycloakConfig = {
   clientId: string
 }
 
+function resolvePortalAvailabilityTimeoutMs() {
+  const raw = import.meta.env.VITE_KEYCLOAK_AVAILABILITY_TIMEOUT_MS?.trim()
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 5000
+  }
+  return parsed
+}
+
 function normalizeEnvValue(value: string | undefined) {
   const trimmed = value?.trim()
   return trimmed && trimmed.length > 0 ? trimmed : undefined
@@ -148,6 +157,48 @@ export async function loginWithKeycloak() {
 
   const href = await keycloak.createLoginUrl({ redirectUri: resolveRedirectUri() })
   window.location.assign(href)
+}
+
+export async function isCentralPortalReachable() {
+  const config = getKeycloakConfig()
+  if (!config) {
+    return false
+  }
+
+  const controller = new AbortController()
+  const timeoutHandle = window.setTimeout(() => {
+    controller.abort()
+  }, resolvePortalAvailabilityTimeoutMs())
+
+  try {
+    const response = await fetch(
+      `${config.url}/realms/${encodeURIComponent(config.realm)}/.well-known/openid-configuration`,
+      {
+        method: 'GET',
+        cache: 'no-store',
+        signal: controller.signal,
+      },
+    )
+    return response.ok
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timeoutHandle)
+  }
+}
+
+export function isKeycloakUnavailableError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false
+  }
+  const message = error.message.toLowerCase()
+  return (
+    message.includes('failed to fetch') ||
+    message.includes('networkerror') ||
+    message.includes('network error') ||
+    message.includes('timeout') ||
+    message.includes('fetch')
+  )
 }
 
 function base64UrlDecode(input: string) {
@@ -317,4 +368,48 @@ export function getCurrentUserDisplayName() {
     typeof parsed.preferred_username === 'string' ? parsed.preferred_username : ''
   const email = typeof parsed.email === 'string' ? parsed.email : ''
   return name || preferredUsername || email
+}
+
+function normalizeRoles(value: string | undefined) {
+  return (value || '')
+    .split(',')
+    .map((r) => r.trim())
+    .filter(Boolean)
+}
+
+function getCurrentUserRoles() {
+  const parsed = keycloak?.tokenParsed as
+    | (KeycloakTokenParsed & {
+        realm_access?: { roles?: string[] }
+        resource_access?: Record<string, { roles?: string[] }>
+      })
+    | undefined
+
+  if (!parsed) {
+    return new Set<string>()
+  }
+
+  const roles = new Set<string>()
+  for (const role of parsed.realm_access?.roles || []) {
+    roles.add(role)
+  }
+  for (const clientName of Object.keys(parsed.resource_access || {})) {
+    const clientRoles = parsed.resource_access?.[clientName]?.roles || []
+    for (const role of clientRoles) {
+      roles.add(role)
+    }
+  }
+  return roles
+}
+
+export function resolveRequiredRoles(value: string | undefined) {
+  return normalizeRoles(value)
+}
+
+export function hasCurrentUserAnyRole(requiredRoles: string[]) {
+  if (requiredRoles.length === 0) {
+    return true
+  }
+  const userRoles = getCurrentUserRoles()
+  return requiredRoles.some((role) => userRoles.has(role))
 }

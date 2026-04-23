@@ -1,6 +1,13 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+  /** Set to 0/false/no to serve dev over HTTP (Web Crypto only works on http://localhost or http://127.0.0.1 then). */
+  readonly VITE_DEV_HTTPS?: string
+  /** PEM paths for a custom dev cert (e.g. mkcert); when both exist, they replace the basic-ssl plugin. */
+  readonly VITE_DEV_SSL_CERT?: string
+  readonly VITE_DEV_SSL_KEY?: string
+  /** Comma-separated extra DNS names for the basic-ssl dev certificate. */
+  readonly VITE_DEV_SSL_DOMAINS?: string
   readonly VITE_FRAPPE_URL?: string
   readonly VITE_FRAPPE_BASE_URL?: string
   readonly VITE_FRAPPE_TOKEN?: string

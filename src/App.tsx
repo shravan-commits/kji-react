@@ -196,17 +196,6 @@ function PortalApp() {
     }
     if (isClientUnavailableError) {
       setPortalUnavailable(true)
-      return
-    }
-    let active = true
-    void isCentralPortalReachable().then((reachable) => {
-      if (!active) {
-        return
-      }
-      setPortalUnavailable(!reachable)
-    })
-    return () => {
-      active = false
     }
   }, [authRevision, isClientUnavailableError])
 
@@ -655,7 +644,10 @@ function PortalApp() {
     if (portalUnavailable) {
       return (
         <main className="portal-unavailable-shell">
-          <CentralPortalUnavailableView onRetry={handleRetryPortalConnection} />
+          <CentralPortalUnavailableView
+            info={maintenanceInfo}
+            onRetry={handleRetryPortalConnection}
+          />
           {isClientUnavailableError ? (
             <p className="subtitle">
               Keycloak client is unavailable or disabled. Please contact your administrator.

@@ -92,10 +92,12 @@ export function NoAccessView({
 }
 
 type CentralPortalUnavailableViewProps = {
+  info: MaintenanceInfo
   onRetry: () => void
 }
 
 export function CentralPortalUnavailableView({
+  info,
   onRetry,
 }: CentralPortalUnavailableViewProps) {
   return (
@@ -114,12 +116,26 @@ export function CentralPortalUnavailableView({
           />
         </div>
         <h2 id="portal-unavailable-title" className="portal-state-heading">
-          Portal Offline
+          We&apos;ll Be Right Back
         </h2>
         <p className="portal-state-lead">
-          The central portal (Keycloak) is currently unavailable. Please try again
-          after some time.
+          The Central Portal is currently unavailable due to maintenance. Please try
+          again after some time.
         </p>
+        <div className="portal-state-card maintenance-meta-card">
+          <div className="maintenance-meta-grid">
+            <div>
+              <p className="maintenance-meta-label">Estimated Duration</p>
+              <p className="maintenance-meta-value">{info.duration}</p>
+              <p className="maintenance-meta-sub">{info.until}</p>
+            </div>
+            <div>
+              <p className="maintenance-meta-label">Maintenance Type</p>
+              <p className="maintenance-meta-value">{info.type}</p>
+              <p className="maintenance-meta-sub">{info.subtype}</p>
+            </div>
+          </div>
+        </div>
         <div className="portal-state-actions">
           <button type="button" className="portal-state-btn primary" onClick={onRetry}>
             Retry Connection

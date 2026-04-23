@@ -19,6 +19,18 @@ type KeycloakConfig = {
   clientId: string
 }
 
+function canUsePkceS256() {
+  return typeof window !== 'undefined' && Boolean(window.crypto?.subtle)
+}
+
+function resolveKeycloakInitOptions() {
+  return {
+    checkLoginIframe: false,
+    redirectUri: resolveKeycloakLoginRedirectUri(),
+    ...(canUsePkceS256() ? { pkceMethod: 'S256' as const } : {}),
+  }
+}
+
 function resolvePortalAvailabilityTimeoutMs() {
   const raw = import.meta.env.VITE_KEYCLOAK_AVAILABILITY_TIMEOUT_MS?.trim()
   const parsed = Number(raw)
@@ -117,11 +129,7 @@ export async function initializeKeycloak(): Promise<KeycloakInitResult> {
   keycloak = new Keycloak(config)
   // No `onLoad: 'check-sso'`: silent SSO would skip the "Login with Keycloak" landing page.
   // redirectUri must match the authorize request so the callback on /applications exchanges the code.
-  await keycloak.init({
-    pkceMethod: 'S256',
-    checkLoginIframe: false,
-    redirectUri: resolveKeycloakLoginRedirectUri(),
-  })
+  await keycloak.init(resolveKeycloakInitOptions())
   keycloakInitialized = true
 
   return { authenticated: Boolean(keycloak.authenticated) }
@@ -147,11 +155,7 @@ export async function loginWithKeycloak() {
     keycloak.realm !== config.realm
   ) {
     keycloak = new Keycloak(config)
-    await keycloak.init({
-      pkceMethod: 'S256',
-      checkLoginIframe: false,
-      redirectUri: resolveKeycloakLoginRedirectUri(),
-    })
+    await keycloak.init(resolveKeycloakInitOptions())
     keycloakInitialized = true
   }
 
@@ -180,7 +184,11 @@ export async function isCentralPortalReachable() {
       },
     )
     return response.ok
-  } catch {
+  } catch (error) {
+    // Timeout should not force the maintenance screen; allow login flow to continue.
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return true
+    }
     return false
   } finally {
     clearTimeout(timeoutHandle)

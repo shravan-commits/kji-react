@@ -1,5 +1,4 @@
 import type { MaintenanceInfo, NoAccessProfile } from './portalState'
-import { getAdminContactUrl } from './portalState'
 
 type NoAccessViewProps = {
   profile: NoAccessProfile
@@ -18,8 +17,6 @@ export function NoAccessView({
   lead,
   statusLabel,
 }: NoAccessViewProps) {
-  const contactUrl = getAdminContactUrl()
-
   return (
     <section className="portal-state-page no-access-page" aria-labelledby="no-access-title">
       <div className="portal-state-stack">
@@ -37,7 +34,7 @@ export function NoAccessView({
         </h2>
         <p className="portal-state-lead">
           {lead ||
-            "You currently don't have rights to access any applications in the portal. Please contact your administrator to get the necessary permissions assigned."}
+            "You currently don't have rights to access any applications in the portal."}
         </p>
         <div className="portal-state-card no-access-card">
           <dl className="portal-state-dl">
@@ -62,13 +59,6 @@ export function NoAccessView({
           </dl>
         </div>
         <div className="portal-state-actions">
-          <a
-            className="portal-state-btn primary"
-            href={contactUrl}
-            rel="noreferrer"
-          >
-            Contact Administrator
-          </a>
           <div className="portal-state-btn-row">
             <button
               type="button"

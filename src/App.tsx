@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { FrappeProvider, useFrappeGetDocList } from 'frappe-react-sdk'
 import {
@@ -9,9 +9,11 @@ import {
   isKeycloakAuthenticated,
   isKeycloakConfigured,
   isKeycloakUnavailableError,
+  forceKeycloakSessionProbeNow,
   loginWithKeycloak,
   logoutFromKeycloak,
   resolveRequiredRoles,
+  subscribeKeycloakSessionLost,
 } from './keycloakAuth'
 import {
   resolveFrappeEnableSocket,
@@ -122,6 +124,7 @@ type FrappeUserDoc = {
 function PortalApp() {
   const navigate = useNavigate()
   const location = useLocation()
+  const trackedAppWindowsRef = useRef<Window[]>([])
   const [authRevision, setAuthRevision] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -182,6 +185,39 @@ function PortalApp() {
   }))
 
   useEffect(() => {
+    return subscribeKeycloakSessionLost(() => {
+      setAuthRevision((n) => n + 1)
+    })
+  }, [])
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (!isKeycloakAuthenticated()) {
+        trackedAppWindowsRef.current = []
+        return
+      }
+      const list = trackedAppWindowsRef.current
+      if (list.length === 0) {
+        return
+      }
+      const stillOpen: Window[] = []
+      let anyClosed = false
+      for (const win of list) {
+        if (win.closed) {
+          anyClosed = true
+        } else {
+          stillOpen.push(win)
+        }
+      }
+      if (anyClosed) {
+        trackedAppWindowsRef.current = stillOpen
+        void forceKeycloakSessionProbeNow()
+      }
+    }, 2000)
+    return () => window.clearInterval(id)
+  }, [authRevision])
+
+  useEffect(() => {
     if (!isKeycloakAuthenticated()) {
       return
     }
@@ -238,7 +274,12 @@ function PortalApp() {
       return
     }
     setAppAccessDenied(null)
-    window.open(app.launchUrl, '_blank', 'noopener,noreferrer')
+    // Do not use `noopener`: Frappe must be able to use `window.opener` to `postMessage` the portal
+    // after logout (see installFrappeAppLogoutPostMessageListener + KALYAN_PORTAL_SSO_ENDED_MESSAGE).
+    const child = window.open(app.launchUrl, '_blank')
+    if (child) {
+      trackedAppWindowsRef.current.push(child)
+    }
   }
 
   const maintenance = isMaintenanceMode()
@@ -386,9 +427,9 @@ function PortalApp() {
               title={appAccessDenied ? 'No Rights' : undefined}
               lead={
                 appAccessDenied
-                  ? `You do not have permission to access ${appAccessDenied}. Please contact your administrator to assign the required Keycloak roles.`
+                  ? `You do not have permission to access ${appAccessDenied}.`
                   : noAccessFromQuery
-                  ? 'We could not complete sign-in to the selected application. Please contact your administrator to verify access permissions and SSO configuration.'
+                  ? 'We could not complete sign-in to the selected application.'
                   : undefined
               }
               statusLabel={
@@ -502,7 +543,7 @@ function PortalApp() {
               <NoAccessView
                 profile={noAccessProfile}
                 title="No Rights"
-                lead="You do not have permission to access the Users section. Please contact your administrator to assign the required Keycloak role."
+                lead="You do not have permission to access the Users section."
                 statusLabel="Users Access Denied"
                 onBackToPortal={handleBackToApplicationsDashboard}
                 onLogout={handlePortalLogout}
@@ -511,7 +552,7 @@ function PortalApp() {
               <NoAccessView
                 profile={noAccessProfile}
                 title="No Rights"
-                lead="We could not validate your access to the Users section right now. Please contact your administrator to verify your permissions and integration settings."
+                lead="We could not validate your access to the Users section right now."
                 statusLabel="Access Validation Failed"
                 onBackToPortal={handleBackToApplicationsDashboard}
                 onLogout={handlePortalLogout}
@@ -649,9 +690,7 @@ function PortalApp() {
             onRetry={handleRetryPortalConnection}
           />
           {isClientUnavailableError ? (
-            <p className="subtitle">
-              Keycloak client is unavailable or disabled. Please contact your administrator.
-            </p>
+            <p className="subtitle">Keycloak client is unavailable or disabled.</p>
           ) : null}
           {loading ? <p className="subtitle">Checking portal status...</p> : null}
         </main>

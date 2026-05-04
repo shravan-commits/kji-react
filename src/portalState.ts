@@ -64,8 +64,3 @@ export function resolveNoAccessProfile(options?: {
     email: envEmail || options?.sessionEmail?.trim() || defaults.email,
   }
 }
-
-export function getAdminContactUrl() {
-  const v = import.meta.env.VITE_ADMIN_CONTACT_URL?.trim()
-  return v || 'mailto:administrator@kalyan.local'
-}

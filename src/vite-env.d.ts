@@ -10,6 +10,8 @@ interface ImportMetaEnv {
   readonly VITE_DEV_SSL_DOMAINS?: string
   readonly VITE_FRAPPE_URL?: string
   readonly VITE_FRAPPE_BASE_URL?: string
+  /** Comma-separated extra browser origins allowed to postMessage this portal on ERP logout. */
+  readonly VITE_FRAPPE_LOGOUT_MESSAGE_ORIGINS?: string
   readonly VITE_FRAPPE_TOKEN?: string
   readonly VITE_FRAPPE_TOKEN_TYPE?: string
   readonly VITE_FRAPPE_ENABLE_SOCKET?: string
@@ -30,6 +32,12 @@ interface ImportMetaEnv {
   readonly VITE_KEYCLOAK_CLIENT_ID?: string
   readonly VITE_KEYCLOAK_REDIRECT_URI?: string
   readonly VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI?: string
+  /** When true/1/yes, Keycloak session iframe polling detects SSO logout from other tabs (test cookie policies). */
+  readonly VITE_KEYCLOAK_CHECK_LOGIN_IFRAME?: string
+  /** Seconds between session iframe checks (min 3). */
+  readonly VITE_KEYCLOAK_CHECK_LOGIN_IFRAME_INTERVAL_SEC?: string
+  /** Periodic forced token refresh in ms (min 15000); 0/unset = off. */
+  readonly VITE_KEYCLOAK_SSO_PROBE_INTERVAL_MS?: string
   readonly VITE_APP_HR_URL?: string
   readonly VITE_APP_HR_REQUIRED_ROLES?: string
   readonly VITE_APP_WAREHOUSE_URL?: string

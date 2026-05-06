@@ -177,15 +177,15 @@ body {
   display: grid;
   grid-template-columns: 260px 1fr;
   height: 100vh;
-  background: radial-gradient(circle at top, #1f1242, #0b0722 65%, #05030f);
+  background: linear-gradient(180deg, #23134f 0%, #130a34 55%, #10062d 100%);
   padding: 10px;
   gap: 10px;
   overflow: visible;
 }
 
 .sidebar {
-  background: radial-gradient(circle at top, #1f1242, #0b0722 65%, #05030f);
-  border: 3px solid transparent;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 18px;
   padding: 12px;
   color: #f2f2f5;
@@ -194,12 +194,21 @@ body {
   justify-content: space-between;
   overflow: hidden;
   position: sticky;
+  isolation: isolate;
   top: 10px;
   max-height: calc(100vh - 20px);
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.08),
     0 14px 32px rgba(0, 0, 0, 0.55),
     0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.sidebar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, #23134f 0%, #130a34 55%, #10062d 100%);
+  z-index: -1;
 }
 
 .brand-box {

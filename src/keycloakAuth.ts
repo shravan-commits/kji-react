@@ -48,9 +48,20 @@ function resolveKeycloakCheckLoginIframeIntervalSec() {
   return undefined
 }
 
-/** Optional periodic forced token refresh (ms). Min 15s. 0 = disabled. */
+/**
+ * Periodic forced token refresh (ms). Min 15s.
+ * When unset, defaults to 45s so the portal notices Keycloak SSO ended elsewhere without extra env.
+ * Set to 0 / false / off to disable.
+ */
 function resolveSsoProbeIntervalMs() {
   const raw = import.meta.env.VITE_KEYCLOAK_SSO_PROBE_INTERVAL_MS?.trim()
+  if (!raw) {
+    return 45000
+  }
+  const lowered = raw.toLowerCase()
+  if (lowered === '0' || lowered === 'false' || lowered === 'off' || lowered === 'no') {
+    return 0
+  }
   const n = Number(raw)
   if (!Number.isFinite(n) || n < 15000) {
     return 0
@@ -213,7 +224,7 @@ function scheduleForcedKeycloakSessionProbe() {
         emitKeycloakSessionLost()
       }
     })
-  }, 450)
+  }, 120)
 }
 
 function installDocumentSessionProbeHooks() {
@@ -230,6 +241,11 @@ function installDocumentSessionProbeHooks() {
 
   document.addEventListener('visibilitychange', onVisibility)
   window.addEventListener('focus', scheduleForcedKeycloakSessionProbe)
+  window.addEventListener('pageshow', (event: PageTransitionEvent) => {
+    if (event.persisted || document.visibilityState === 'visible') {
+      scheduleForcedKeycloakSessionProbe()
+    }
+  })
 }
 
 /**
@@ -562,7 +578,10 @@ export async function forceKeycloakSessionProbeNow() {
   try {
     await kc.updateToken(-1)
   } catch {
-    // Tokens may have been cleared by keycloak-js on refresh failure
+    // After a 400, keycloak-js clears tokens and fires onAuthLogout; other errors leave the session.
+    if (!kc.authenticated) {
+      emitKeycloakSessionLost()
+    }
   }
 }
 

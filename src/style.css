@@ -177,21 +177,14 @@ body {
   display: grid;
   grid-template-columns: 260px 1fr;
   height: 100vh;
-  background: #060608;
+  background: radial-gradient(circle at top, #1f1242, #0b0722 65%, #05030f);
   padding: 10px;
   gap: 10px;
   overflow: visible;
 }
 
 .sidebar {
-  background:
-    linear-gradient(#050507, #050507) padding-box,
-    linear-gradient(
-        180deg,
-        rgba(255, 255, 255, 0.27) 0%,
-        rgba(250, 207, 113, 0.0891) 100%
-      )
-      border-box;
+  background: radial-gradient(circle at top, #1f1242, #0b0722 65%, #05030f);
   border: 3px solid transparent;
   border-radius: 18px;
   padding: 12px;

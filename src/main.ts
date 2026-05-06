@@ -2,7 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
-import { initializeKeycloak } from './keycloakAuth'
+import { initializeKeycloak, installFrappeAppLogoutPostMessageListener } from './keycloakAuth'
 
 async function bootstrap() {
   try {
@@ -10,6 +10,7 @@ async function bootstrap() {
   } catch (error) {
     console.error('Keycloak initialization failed:', error)
   }
+  installFrappeAppLogoutPostMessageListener()
 
   ReactDOM.createRoot(document.getElementById('app') as HTMLElement).render(
     React.createElement(

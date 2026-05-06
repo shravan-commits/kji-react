@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { FrappeProvider, useFrappeGetDocList } from 'frappe-react-sdk'
 import {
@@ -9,12 +9,15 @@ import {
   isKeycloakAuthenticated,
   isKeycloakConfigured,
   isKeycloakUnavailableError,
+  forceKeycloakSessionProbeNow,
   loginWithKeycloak,
   logoutFromKeycloak,
   resolveRequiredRoles,
+  subscribeKeycloakSessionLost,
 } from './keycloakAuth'
 import {
   resolveFrappeEnableSocket,
+  resolveFrappePostMessageOrigins,
   resolveFrappeProviderUrl,
   resolveFrappeTokenParams,
 } from './frappeSdk'
@@ -33,6 +36,7 @@ import './style.css'
 
 /** Dashboard URL after Keycloak sign-in. */
 const APPLICATIONS_PATH = '/applications' as const
+const PORTAL_LOGOUT_SYNC_KEY = 'kalyan-portal:logout-sync' as const
 
 type MenuKey = 'applications' | 'users'
 
@@ -53,6 +57,19 @@ type UserRow = {
   status: 'ACTIVE' | 'INACTIVE'
   primaryLocation: string
   locationRights: string
+}
+
+function toOrigin(value: string) {
+  try {
+    return new URL(value, window.location.href).origin
+  } catch {
+    return ''
+  }
+}
+
+type TrackedApplicationWindow = {
+  window: Window
+  logoutUrl: string | null
 }
 
 const applications: ApplicationCard[] = [
@@ -122,6 +139,8 @@ type FrappeUserDoc = {
 function PortalApp() {
   const navigate = useNavigate()
   const location = useLocation()
+  const trackedAppWindowsRef = useRef<TrackedApplicationWindow[]>([])
+  const wasAuthenticatedRef = useRef(false)
   const [authRevision, setAuthRevision] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -143,11 +162,30 @@ function PortalApp() {
       description: description.trim().toLowerCase(),
     }
   })()
+  const isAuthenticated = isKeycloakAuthenticated()
   const isClientUnavailableError =
     keycloakAuthError.error.includes('client') ||
     keycloakAuthError.error.includes('unauthorized_client') ||
     keycloakAuthError.description.includes('client') ||
     keycloakAuthError.description.includes('disabled')
+  const knownApplicationOrigins = (() => {
+    const out = new Set<string>()
+    for (const app of applications) {
+      if (app.launchUrl) {
+        const appOrigin = toOrigin(app.launchUrl)
+        if (appOrigin) {
+          out.add(appOrigin)
+        }
+      }
+    }
+    for (const origin of resolveFrappePostMessageOrigins()) {
+      const normalized = toOrigin(origin)
+      if (normalized) {
+        out.add(normalized)
+      }
+    }
+    return out
+  })()
 
   const canViewUserList = hasCurrentUserAnyRole(usersRequiredRoles)
   const userListSwrKey = activeMenu === 'users' && canViewUserList ? undefined : null
@@ -180,6 +218,98 @@ function PortalApp() {
     primaryLocation: '—',
     locationRights: '—',
   }))
+
+  useEffect(() => {
+    return subscribeKeycloakSessionLost(() => {
+      setAuthRevision((n) => n + 1)
+    })
+  }, [])
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== PORTAL_LOGOUT_SYNC_KEY || !event.newValue) {
+        return
+      }
+      if (!isKeycloakAuthenticated()) {
+        return
+      }
+      void logoutFromKeycloak().catch(() => {
+        setAuthRevision((n) => n + 1)
+        setActiveMenu('applications')
+        navigate('/', { replace: true })
+      })
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [navigate])
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      return
+    }
+    const referrer = document.referrer
+    if (!referrer) {
+      return
+    }
+    const referrerOrigin = toOrigin(referrer)
+    if (!referrerOrigin || !knownApplicationOrigins.has(referrerOrigin)) {
+      return
+    }
+    try {
+      localStorage.setItem(PORTAL_LOGOUT_SYNC_KEY, String(Date.now()))
+    } catch {
+      // Ignore storage write failures; this is a best-effort cross-tab sync signal.
+    }
+  }, [isAuthenticated, knownApplicationOrigins])
+
+  useEffect(() => {
+    const wasAuthenticated = wasAuthenticatedRef.current
+    if (isAuthenticated) {
+      wasAuthenticatedRef.current = true
+      return
+    }
+    if (!wasAuthenticated) {
+      return
+    }
+    wasAuthenticatedRef.current = false
+    try {
+      localStorage.setItem(PORTAL_LOGOUT_SYNC_KEY, String(Date.now()))
+    } catch {
+      // Ignore storage write failures (private mode / quota), local logout still works.
+    }
+  }, [isAuthenticated])
+
+  // While an ERP window opened from here is still open (or just closed), force a Keycloak refresh so
+  // the main tab notices sso_logout / global SSO end without waiting for focus or the global probe interval.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (!isKeycloakAuthenticated()) {
+        trackedAppWindowsRef.current = []
+        return
+      }
+      const list = trackedAppWindowsRef.current
+      if (list.length === 0) {
+        return
+      }
+      const stillOpen: TrackedApplicationWindow[] = []
+      let anyClosed = false
+      for (const entry of list) {
+        if (entry.window.closed) {
+          anyClosed = true
+        } else {
+          stillOpen.push(entry)
+        }
+      }
+      if (anyClosed) {
+        trackedAppWindowsRef.current = stillOpen
+      }
+      const hasOpenAuxiliary = stillOpen.length > 0
+      if (anyClosed || hasOpenAuxiliary) {
+        void forceKeycloakSessionProbeNow()
+      }
+    }, 4000)
+    return () => window.clearInterval(id)
+  }, [authRevision])
 
   useEffect(() => {
     if (!isKeycloakAuthenticated()) {
@@ -238,7 +368,59 @@ function PortalApp() {
       return
     }
     setAppAccessDenied(null)
-    window.open(app.launchUrl, '_blank', 'noopener,noreferrer')
+    // Avoid `_blank` alone (some browsers treat it like noopener). Use a unique name + no feature string
+    // so `window.opener` stays usable for Frappe postMessage after logout.
+    const targetName = `kalyan-erp-${app.id}-${Date.now()}`
+    const child = window.open(app.launchUrl, targetName)
+    if (child) {
+      trackedAppWindowsRef.current.push({
+        window: child,
+        logoutUrl: resolveApplicationLogoutUrl(app.launchUrl),
+      })
+    }
+  }
+
+  function resolveApplicationLogoutUrl(launchUrl: string) {
+    const fallbackOrigin = (() => {
+      try {
+        return new URL(launchUrl, window.location.href).origin
+      } catch {
+        return null
+      }
+    })()
+    try {
+      const parsed = new URL(launchUrl, window.location.href)
+      const redirectUriParam = parsed.searchParams.get('redirect_uri')
+      if (redirectUriParam) {
+        const redirectUri = new URL(decodeURIComponent(redirectUriParam))
+        return `${redirectUri.origin}/api/method/keycloak_integration.utils.sso_logout?redirect_to=${encodeURIComponent(window.location.origin)}`
+      }
+    } catch {
+      // Fall through to origin-only construction below.
+    }
+    if (!fallbackOrigin) {
+      return null
+    }
+    return `${fallbackOrigin}/api/method/keycloak_integration.utils.sso_logout?redirect_to=${encodeURIComponent(window.location.origin)}`
+  }
+
+  const notifyTrackedAppsToLogout = () => {
+    const trackedApps = trackedAppWindowsRef.current
+    if (trackedApps.length === 0) {
+      return
+    }
+    for (const entry of trackedApps) {
+      if (entry.window.closed || !entry.logoutUrl) {
+        continue
+      }
+      try {
+        // Cross-origin navigation is allowed on a retained window handle and enforces app-side logout.
+        entry.window.location.assign(entry.logoutUrl)
+      } catch {
+        // Ignore per-window navigation errors; central logout still proceeds.
+      }
+    }
+    trackedAppWindowsRef.current = trackedApps.filter((entry) => !entry.window.closed)
   }
 
   const maintenance = isMaintenanceMode()
@@ -253,6 +435,27 @@ function PortalApp() {
       noAccessFromQuery ||
       Boolean(appAccessDenied) ||
       availableApplications.length === 0)
+
+  useEffect(() => {
+    if (!noAccessFromQuery) {
+      return
+    }
+    // Fan out logout to other portal tabs even when this tab is already unauthenticated.
+    try {
+      localStorage.setItem(PORTAL_LOGOUT_SYNC_KEY, String(Date.now()))
+    } catch {
+      // Ignore storage failures; direct-tab logout below still runs when authenticated.
+    }
+    if (!isAuthenticated) {
+      return
+    }
+    // When a linked app reports sign-out/no_access, force central portal sign-out too.
+    void logoutFromKeycloak().catch(() => {
+      setAuthRevision((n) => n + 1)
+      setActiveMenu('applications')
+      navigate('/', { replace: true })
+    })
+  }, [isAuthenticated, navigate, noAccessFromQuery])
 
   const sessionEmail = getCurrentUserLabel()
   const displayName = getCurrentUserDisplayName() || 'User'
@@ -272,11 +475,13 @@ function PortalApp() {
 
   const handlePortalLogout = async () => {
     setError('')
+    notifyTrackedAppsToLogout()
     try {
       await logoutFromKeycloak()
     } catch {
       // Ignore Keycloak redirect errors and continue local cleanup.
     }
+    trackedAppWindowsRef.current = []
     setAuthRevision((n) => n + 1)
     setActiveMenu('applications')
   }
@@ -289,7 +494,7 @@ function PortalApp() {
     }
   }
 
-  if (isKeycloakAuthenticated()) {
+  if (isAuthenticated) {
     return (
       <main className="portal-layout">
         <aside className="sidebar">
@@ -386,9 +591,9 @@ function PortalApp() {
               title={appAccessDenied ? 'No Rights' : undefined}
               lead={
                 appAccessDenied
-                  ? `You do not have permission to access ${appAccessDenied}. Please contact your administrator to assign the required Keycloak roles.`
+                  ? `You do not have permission to access ${appAccessDenied}.`
                   : noAccessFromQuery
-                  ? 'We could not complete sign-in to the selected application. Please contact your administrator to verify access permissions and SSO configuration.'
+                  ? 'We could not complete sign-in to the selected application.'
                   : undefined
               }
               statusLabel={
@@ -470,14 +675,6 @@ function PortalApp() {
                     </div>
                     <p>{app.description}</p>
                     <div className="app-footer">
-                      <div className="app-users">
-                        <div className="avatar-stack" aria-hidden="true">
-                          <span>👨🏻‍💼</span>
-                          <span>👩🏽‍💼</span>
-                          <span>40+</span>
-                        </div>
-                        <strong>Users</strong>
-                      </div>
                       <button
                         className="app-open-btn"
                         type="button"
@@ -502,7 +699,7 @@ function PortalApp() {
               <NoAccessView
                 profile={noAccessProfile}
                 title="No Rights"
-                lead="You do not have permission to access the Users section. Please contact your administrator to assign the required Keycloak role."
+                lead="You do not have permission to access the Users section."
                 statusLabel="Users Access Denied"
                 onBackToPortal={handleBackToApplicationsDashboard}
                 onLogout={handlePortalLogout}
@@ -511,7 +708,7 @@ function PortalApp() {
               <NoAccessView
                 profile={noAccessProfile}
                 title="No Rights"
-                lead="We could not validate your access to the Users section right now. Please contact your administrator to verify your permissions and integration settings."
+                lead="We could not validate your access to the Users section right now."
                 statusLabel="Access Validation Failed"
                 onBackToPortal={handleBackToApplicationsDashboard}
                 onLogout={handlePortalLogout}
@@ -640,7 +837,7 @@ function PortalApp() {
     )
   }
 
-  if (!isKeycloakAuthenticated()) {
+  if (!isAuthenticated) {
     if (portalUnavailable) {
       return (
         <main className="portal-unavailable-shell">
@@ -649,9 +846,7 @@ function PortalApp() {
             onRetry={handleRetryPortalConnection}
           />
           {isClientUnavailableError ? (
-            <p className="subtitle">
-              Keycloak client is unavailable or disabled. Please contact your administrator.
-            </p>
+            <p className="subtitle">Keycloak client is unavailable or disabled.</p>
           ) : null}
           {loading ? <p className="subtitle">Checking portal status...</p> : null}
         </main>

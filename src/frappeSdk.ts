@@ -15,6 +15,34 @@ export function resolveFrappeProviderUrl(): string {
   return base.replace(/\/+$/, '')
 }
 
+function tryAddPostMessageOrigin(out: Set<string>, raw: string | undefined) {
+  const trimmed = raw?.trim()
+  if (!trimmed) {
+    return
+  }
+  try {
+    const url = trimmed.includes('://') ? new URL(trimmed) : new URL(`https://${trimmed}`)
+    out.add(url.origin)
+  } catch {
+    // ignore invalid URL
+  }
+}
+
+/**
+ * Browser origins allowed to send `postMessage` to this portal when an ERP tab reports logout.
+ * Must include the Frappe site origin (e.g. from VITE_FRAPPE_BASE_URL).
+ */
+export function resolveFrappePostMessageOrigins(): string[] {
+  const out = new Set<string>()
+  tryAddPostMessageOrigin(out, import.meta.env.VITE_FRAPPE_BASE_URL)
+  tryAddPostMessageOrigin(out, import.meta.env.VITE_FRAPPE_URL)
+  const extra = import.meta.env.VITE_FRAPPE_LOGOUT_MESSAGE_ORIGINS?.split(',') ?? []
+  for (const part of extra) {
+    tryAddPostMessageOrigin(out, part.trim())
+  }
+  return [...out]
+}
+
 type FrappeTokenParams = {
   useToken: true
   token: () => string

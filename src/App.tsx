@@ -2,8 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { FrappeProvider, useFrappeGetDocList } from 'frappe-react-sdk'
 import {
+  fetchCurrentUserLocationsFromUserInfo,
+  getCurrentClientAccessClaims,
   getCurrentUserDisplayName,
+  getCurrentUserDesignation,
   getCurrentUserLabel,
+  getCurrentUserLocations,
   hasCurrentUserAnyRole,
   isCentralPortalReachable,
   isKeycloakAuthenticated,
@@ -46,6 +50,7 @@ type ApplicationCard = {
   usage: string
   status: 'active' | 'inactive'
   description: string
+  locations?: string[]
   launchUrl?: string
   requiredRoles?: string[]
 }
@@ -67,10 +72,46 @@ function toOrigin(value: string) {
   }
 }
 
+function toLocationKey(value: string) {
+  const cleaned = value.trim().toLowerCase().replace(/\s+/g, ' ')
+  if (!cleaned) {
+    return ''
+  }
+  // Backend sometimes emits "TRISSUR" while app config uses "Thrissur".
+  if (cleaned === 'trissur' || cleaned === 'thrissur') {
+    return 'thrissur'
+  }
+  return cleaned
+}
+
+function getClientIdFromLaunchUrl(launchUrl?: string) {
+  if (!launchUrl) {
+    return ''
+  }
+  try {
+    const parsed = new URL(launchUrl, window.location.href)
+    return parsed.searchParams.get('client_id')?.trim() || ''
+  } catch {
+    return ''
+  }
+}
+
 type TrackedApplicationWindow = {
   window: Window
   logoutUrl: string | null
 }
+
+// Temporary rollout mapping until per-client locations are sourced from final backend setup.
+const TEMP_APPLICATION_LOCATIONS = [
+  'Thrissur',
+  'Kochi',
+  'Delhi',
+  'Mumbai',
+  'Chennai',
+  'Bangalore',
+  'Hyderabad',
+  'Coimbatore',
+] as const
 
 const applications: ApplicationCard[] = [
   {
@@ -79,6 +120,7 @@ const applications: ApplicationCard[] = [
     usage: 'HR Usage',
     status: 'active',
     description: 'Advanced predictive modeling and data visualization for supply chain management.',
+    locations: [...TEMP_APPLICATION_LOCATIONS],
     launchUrl: import.meta.env.VITE_APP_HR_URL,
     requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_HR_REQUIRED_ROLES),
   },
@@ -88,6 +130,7 @@ const applications: ApplicationCard[] = [
     usage: 'Warehouse Usage',
     status: 'active',
     description: 'Manage inventory movement, stock health, and warehouse operations from one panel.',
+    locations: [...TEMP_APPLICATION_LOCATIONS],
     launchUrl: import.meta.env.VITE_APP_WAREHOUSE_URL,
     requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_WAREHOUSE_REQUIRED_ROLES),
   },
@@ -97,6 +140,7 @@ const applications: ApplicationCard[] = [
     usage: 'Sales Usage',
     status: 'active',
     description: 'Track opportunities, customer conversion, and regional sales performance in real time.',
+    locations: [...TEMP_APPLICATION_LOCATIONS],
     launchUrl: import.meta.env.VITE_APP_SALES_URL,
     requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_SALES_REQUIRED_ROLES),
   },
@@ -106,6 +150,7 @@ const applications: ApplicationCard[] = [
     usage: 'Stock Usage',
     status: 'inactive',
     description: 'This application is currently inactive and not available for use.',
+    locations: ['Thrissur', 'Delhi'],
   },
   {
     id: 5,
@@ -113,6 +158,7 @@ const applications: ApplicationCard[] = [
     usage: 'Finance Usage',
     status: 'active',
     description: 'Control payables, receivables, approvals, and key financial indicators.',
+    locations: [...TEMP_APPLICATION_LOCATIONS],
     launchUrl: import.meta.env.VITE_APP_FINANCE_URL,
     requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_FINANCE_REQUIRED_ROLES),
   },
@@ -122,6 +168,7 @@ const applications: ApplicationCard[] = [
     usage: 'Quality Usage',
     status: 'inactive',
     description: 'This application is currently inactive and not available for use.',
+    locations: ['Thrissur'],
   },
 ]
 
@@ -148,6 +195,10 @@ function PortalApp() {
   const [appAccessDenied, setAppAccessDenied] = useState<string | null>(null)
   const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
   const [search, setSearch] = useState('')
+  const [selectedLocation, setSelectedLocation] = useState('all')
+  const [locationDropdownOpen, setLocationDropdownOpen] = useState(false)
+  const [userinfoLocations, setUserinfoLocations] = useState<string[]>([])
+  const locationDropdownRef = useRef<HTMLDivElement>(null)
   const keycloakAuthError = (() => {
     const searchParams = new URLSearchParams(location.search)
     const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''))
@@ -224,6 +275,31 @@ function PortalApp() {
       setAuthRevision((n) => n + 1)
     })
   }, [])
+
+  useEffect(() => {
+    if (!locationDropdownOpen) {
+      return
+    }
+    const onMouseDown = (event: MouseEvent) => {
+      if (
+        locationDropdownRef.current &&
+        !locationDropdownRef.current.contains(event.target as Node)
+      ) {
+        setLocationDropdownOpen(false)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setLocationDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [locationDropdownOpen])
 
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
@@ -329,6 +405,32 @@ function PortalApp() {
     }
   }, [authRevision, isClientUnavailableError])
 
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return
+    }
+    // Pull latest role/location claims from backend as soon as the dashboard loads.
+    void forceKeycloakSessionProbeNow().finally(() => {
+      setAuthRevision((n) => n + 1)
+    })
+  }, [isAuthenticated])
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setUserinfoLocations([])
+      return
+    }
+    let cancelled = false
+    void fetchCurrentUserLocationsFromUserInfo().then((locations) => {
+      if (!cancelled) {
+        setUserinfoLocations(locations)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [isAuthenticated, authRevision])
+
   const handleLoginWithKeycloak = async () => {
     setError('')
     setPortalUnavailable(false)
@@ -359,11 +461,30 @@ function PortalApp() {
     setLoading(false)
   }
 
+  const clientAccessClaims = getCurrentClientAccessClaims()
+
+  const hasRoleAccessForApplication = (app: ApplicationCard) => {
+    const requiredRoles = app.requiredRoles || []
+    const clientId = getClientIdFromLaunchUrl(app.launchUrl)
+    const clientRoles = clientId ? clientAccessClaims[clientId]?.roles || [] : []
+    // Required roles should be matched against the full token role surface
+    // (realm_access + all resource_access roles), not just one client bucket.
+    if (requiredRoles.length > 0) {
+      return hasCurrentUserAnyRole(requiredRoles)
+    }
+    // If no explicit required roles are configured, keep a lightweight guard:
+    // app tied to a client should require at least one role in that client.
+    if (clientId) {
+      return clientRoles.length > 0
+    }
+    return true
+  }
+
   const openApplication = (app: ApplicationCard) => {
     if (!app.launchUrl || app.status !== 'active') {
       return
     }
-    if (!hasCurrentUserAnyRole(app.requiredRoles || [])) {
+    if (!hasRoleAccessForApplication(app)) {
       setAppAccessDenied(app.name)
       return
     }
@@ -459,15 +580,85 @@ function PortalApp() {
 
   const sessionEmail = getCurrentUserLabel()
   const displayName = getCurrentUserDisplayName() || 'User'
+  const designation = getCurrentUserDesignation()
+  const tokenLocations = getCurrentUserLocations()
+  const userLocations = userinfoLocations.length > 0 ? userinfoLocations : tokenLocations
+  const userLocationKeys = [...new Set(userLocations.map((location) => toLocationKey(location)))]
+  const locationOptionMap = new Map<string, string>()
+  for (const app of applications) {
+    const clientId = getClientIdFromLaunchUrl(app.launchUrl)
+    const clientLocations = clientId
+      ? clientAccessClaims[clientId]?.locations || []
+      : []
+    const effectiveLocations = clientLocations.length > 0 ? clientLocations : userLocations
+    for (const locationName of effectiveLocations) {
+      const key = toLocationKey(locationName)
+      if (key && !locationOptionMap.has(key)) {
+        locationOptionMap.set(key, locationName.trim())
+      }
+    }
+  }
+  const normalizedUserLocations = [...locationOptionMap.keys()]
+  const locationOptions = [...locationOptionMap.values()]
+  const locationFilterItems: { value: string; label: string }[] = [
+    { value: 'all', label: 'All Locations' },
+    ...locationOptions.map((name) => ({ value: name, label: name })),
+  ]
+  useEffect(() => {
+    if (selectedLocation === 'all') {
+      return
+    }
+    const selectedStillAvailable = locationFilterItems.some(
+      (item) => item.value.toLowerCase() === selectedLocation.toLowerCase(),
+    )
+    if (!selectedStillAvailable) {
+      setSelectedLocation('all')
+    }
+  }, [locationFilterItems, selectedLocation])
+
+  const selectedLocationLabel =
+    locationFilterItems.find(
+      (item) => item.value.toLowerCase() === selectedLocation.toLowerCase(),
+    )?.label ?? 'All Locations'
   const noAccessProfile = resolveNoAccessProfile({
     sessionEmail,
     sessionName: displayName,
   })
   const maintenanceInfo = getMaintenanceInfo()
 
-  const filteredApplications = applications.filter((app) =>
-    app.name.toLowerCase().includes(search.trim().toLowerCase()),
-  )
+  const filteredApplications = applications.filter((app) => {
+    const clientId = getClientIdFromLaunchUrl(app.launchUrl)
+    const clientLocations = clientId
+      ? clientAccessClaims[clientId]?.locations || []
+      : []
+    const appLocationNames =
+      clientLocations.length > 0
+        ? clientLocations.map((locationName) => toLocationKey(locationName)).filter(Boolean)
+        : (app.locations || []).map((locationName) => toLocationKey(locationName)).filter(Boolean)
+    const hasUserLocationAccess =
+      normalizedUserLocations.length > 0 &&
+      (userLocationKeys.length === 0 ||
+        appLocationNames.some((locationName) => userLocationKeys.includes(locationName))) &&
+      appLocationNames.some((locationName) =>
+        normalizedUserLocations.includes(locationName),
+      )
+    const matchesSearch = app.name.toLowerCase().includes(search.trim().toLowerCase())
+    const matchesLocation =
+      selectedLocation === 'all' ||
+      appLocationNames.some(
+        (locationName) => locationName === toLocationKey(selectedLocation),
+      )
+    return (
+      hasUserLocationAccess &&
+      matchesSearch &&
+      matchesLocation &&
+      hasRoleAccessForApplication(app)
+    )
+  })
+  const locationAccessDenied =
+    selectedLocation !== 'all' &&
+    search.trim().length === 0 &&
+    filteredApplications.length === 0
 
   const filteredUsers = users.filter((item) =>
     item.name.toLowerCase().includes(search.trim().toLowerCase()),
@@ -573,6 +764,7 @@ function PortalApp() {
                 <div className="profile-details">
                   <strong>{displayName}</strong>
                   <span>{sessionEmail || ''}</span>
+                  {designation ? <span>{designation}</span> : null}
                 </div>
               </div>
             </div>
@@ -585,19 +777,23 @@ function PortalApp() {
             />
           ) : null}
 
-          {!maintenance && activeMenu === 'applications' && noAccess ? (
+          {!maintenance && activeMenu === 'applications' && (noAccess || locationAccessDenied) ? (
             <NoAccessView
               profile={noAccessProfile}
-              title={appAccessDenied ? 'No Rights' : undefined}
+              title={locationAccessDenied || appAccessDenied ? 'No Rights' : undefined}
               lead={
-                appAccessDenied
+                locationAccessDenied
+                  ? 'You have no rights to this location.'
+                  : appAccessDenied
                   ? `You do not have permission to access ${appAccessDenied}.`
                   : noAccessFromQuery
                   ? 'We could not complete sign-in to the selected application.'
                   : undefined
               }
               statusLabel={
-                appAccessDenied
+                locationAccessDenied
+                  ? 'Location Access Denied'
+                  : appAccessDenied
                   ? 'Application Access Denied'
                   : noAccessFromQuery
                     ? 'Application Access Failed'
@@ -608,7 +804,7 @@ function PortalApp() {
             />
           ) : null}
 
-          {!maintenance && activeMenu === 'applications' && !noAccess ? (
+          {!maintenance && activeMenu === 'applications' && !(noAccess || locationAccessDenied) ? (
             <section className="view-wrap">
               <h1>Integrated Applications</h1>
               <p className="view-subtitle">
@@ -637,23 +833,88 @@ function PortalApp() {
                       <img src="/searchButton.svg" width={30} height={30} alt="" />
                     </button>
                   </div>
-                  <button type="button" className="sort-pill">
-                    <img
-                      src="/sortButton.svg"
-                      className="sort-pill-icon"
-                      width={30}
-                      height={30}
-                      alt=""
-                    />
-                    <span className="sort-pill-label">Sort by</span>
-                    <span className="sort-pill-chevron" aria-hidden>
-                      ▼
-                    </span>
-                  </button>
+                  <div
+                    className={`loc-dropdown ${locationDropdownOpen ? 'is-open' : ''}`}
+                    ref={locationDropdownRef}
+                  >
+                    <button
+                      type="button"
+                      className="loc-dropdown-trigger sort-pill"
+                      id="location-filter-trigger"
+                      aria-haspopup="listbox"
+                      aria-expanded={locationDropdownOpen}
+                      aria-controls="location-filter-listbox"
+                      aria-label={`Filter by location. ${selectedLocationLabel}`}
+                      onClick={() => setLocationDropdownOpen((open) => !open)}
+                    >
+                      <img
+                        src="/sortButton.svg"
+                        className="sort-pill-icon"
+                        width={30}
+                        height={30}
+                        alt=""
+                      />
+                      <span className="sort-pill-label">Location</span>
+                      <span className="loc-dropdown-value">{selectedLocationLabel}</span>
+                      <span className="sort-pill-chevron loc-dropdown-chevron" aria-hidden>
+                        ▼
+                      </span>
+                    </button>
+                    {locationDropdownOpen ? (
+                      <div
+                        className="loc-dropdown-panel"
+                        id="location-filter-listbox"
+                        role="listbox"
+                        aria-labelledby="location-filter-trigger"
+                      >
+                        <div className="loc-dropdown-panel-glow" aria-hidden />
+                        <div className="loc-dropdown-list" role="presentation">
+                          {locationFilterItems.map((item, index) => {
+                            const selected =
+                              item.value.toLowerCase() === selectedLocation.toLowerCase()
+                            return (
+                              <div
+                                key={item.value === 'all' ? 'all' : item.value}
+                                className="loc-dropdown-item-wrap"
+                                role="presentation"
+                                style={{ animationDelay: `${40 + index * 48}ms` }}
+                              >
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected={selected}
+                                  className={`loc-dropdown-item ${selected ? 'is-selected' : ''}`}
+                                  onClick={() => {
+                                    setSelectedLocation(item.value)
+                                    setLocationDropdownOpen(false)
+                                  }}
+                                >
+                                  <span className="loc-dropdown-item-check" aria-hidden>
+                                    ✓
+                                  </span>
+                                  <span className="loc-dropdown-item-label">{item.label}</span>
+                                </button>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </div>
               <div className="apps-grid">
-                {filteredApplications.map((app) => (
+                {filteredApplications.map((app) => {
+                  const appClientId = getClientIdFromLaunchUrl(app.launchUrl)
+                  const cardName = appClientId || app.name
+                  const hasAccess = hasRoleAccessForApplication(app)
+                  const buttonClassName =
+                    app.status !== 'active'
+                      ? 'app-open-btn is-disabled'
+                      : hasAccess
+                        ? 'app-open-btn can-open'
+                        : 'app-open-btn no-access'
+                  return (
                   <article key={app.id} className="app-card">
                     <div className="app-head">
                       <div className="app-title-wrap">
@@ -664,7 +925,7 @@ function PortalApp() {
                           </svg>
                         </div>
                         <div>
-                          <h3>{app.name}</h3>
+                          <h3>{cardName}</h3>
                           <small>{app.usage}</small>
                         </div>
                       </div>
@@ -676,20 +937,20 @@ function PortalApp() {
                     <p>{app.description}</p>
                     <div className="app-footer">
                       <button
-                        className="app-open-btn"
+                        className={buttonClassName}
                         type="button"
-                        aria-label={`Open ${app.name}`}
+                        aria-label={`Open ${cardName}`}
                         disabled={app.status !== 'active'}
                         onClick={() => openApplication(app)}
                       >
-                        <img
-                          src={app.status === 'active' ? '/BlackButton.svg' : '/GreyButton.svg'}
-                          alt=""
-                        />
+                        <span className="app-open-arrow" aria-hidden>
+                          →
+                        </span>
                       </button>
                     </div>
                   </article>
-                ))}
+                  )
+                })}
               </div>
             </section>
           ) : null}
@@ -885,7 +1146,7 @@ function PortalApp() {
               disabled={loading}
               onClick={() => void handleLoginWithKeycloak()}
             >
-              {loading ? 'Redirecting...' : 'Login with Keycloak'}
+              {loading ? 'Redirecting...' : 'Login with Employee Code'}
             </button>
           </div>
         </section>

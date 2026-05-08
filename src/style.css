@@ -689,12 +689,42 @@ body {
   align-items: center;
   gap: 10px;
   flex: 0 0 auto;
-  background: #fff;
-  border: 1px solid #d8dbe3;
+  background: linear-gradient(145deg, #ffffff 0%, #f6f8fc 100%);
+  border: 1px solid #d4d9e4;
   border-radius: 999px;
-  padding: 4px 14px 4px 5px;
+  padding: 5px 14px 5px 6px;
   cursor: pointer;
   font: inherit;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 8px 22px rgba(15, 23, 42, 0.08);
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    border-color 0.2s ease,
+    background 0.2s ease;
+}
+
+.sort-pill:hover {
+  transform: translateY(-1px);
+  border-color: #bcc6d9;
+  box-shadow:
+    0 2px 4px rgba(15, 23, 42, 0.09),
+    0 12px 26px rgba(15, 23, 42, 0.12);
+}
+
+.sort-pill:focus-within,
+.loc-dropdown-trigger.sort-pill:focus-visible {
+  border-color: #7c3aed;
+  background: linear-gradient(145deg, #ffffff 0%, #f8f6ff 100%);
+  box-shadow:
+    0 0 0 4px rgba(124, 58, 237, 0.14),
+    0 10px 24px rgba(124, 58, 237, 0.2);
+}
+
+.loc-dropdown.is-open .loc-dropdown-trigger.sort-pill {
+  border-color: #7c3aed;
+  background: linear-gradient(145deg, #ffffff 0%, #f8f6ff 100%);
 }
 
 .sort-pill-icon {
@@ -706,16 +736,203 @@ body {
 
 .sort-pill-label {
   font-size: 14px;
-  font-weight: 500;
-  color: #2e3238;
+  font-weight: 600;
+  color: #2c3040;
   white-space: nowrap;
 }
 
 .sort-pill-chevron {
-  font-size: 9px;
-  color: #5c6168;
-  margin-left: 2px;
+  font-size: 10px;
+  color: #515a70;
+  margin-left: 0;
   line-height: 1;
+  transition: transform 0.2s ease;
+}
+
+.sort-pill:focus-within .sort-pill-chevron,
+.loc-dropdown.is-open .loc-dropdown-chevron {
+  transform: rotate(180deg);
+}
+
+.sort-pill-select {
+  border: none;
+  background: transparent;
+  color: #2e3238;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 0 4px;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  min-width: 120px;
+}
+
+/* Custom location dropdown — animated panel + option stagger */
+.loc-dropdown {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.loc-dropdown-trigger.sort-pill {
+  cursor: pointer;
+  border: none;
+  font: inherit;
+  gap: 8px;
+}
+
+.loc-dropdown-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e1b4b;
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loc-dropdown-chevron {
+  margin-left: 2px;
+  transition:
+    transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
+    color 0.2s ease;
+}
+
+.loc-dropdown-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  min-width: min(260px, calc(100vw - 48px));
+  z-index: 40;
+  border-radius: 16px;
+  padding: 6px;
+  background: linear-gradient(145deg, #ffffff 0%, #f4f2ff 70%, #faf8ff 100%);
+  border: 1px solid rgba(124, 58, 237, 0.22);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.6) inset,
+    0 4px 6px rgba(15, 23, 42, 0.04),
+    0 18px 40px rgba(76, 29, 149, 0.18),
+    0 8px 16px rgba(15, 23, 42, 0.08);
+  transform-origin: top right;
+  animation: loc-dropdown-panel-in 0.38s cubic-bezier(0.34, 1.2, 0.64, 1) both;
+}
+
+@keyframes loc-dropdown-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.96);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+.loc-dropdown-panel-glow {
+  pointer-events: none;
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: radial-gradient(
+    120% 80% at 90% 0%,
+    rgba(124, 58, 237, 0.12) 0%,
+    transparent 55%
+  );
+  opacity: 0.9;
+}
+
+.loc-dropdown-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  position: relative;
+}
+
+.loc-dropdown-item-wrap {
+  opacity: 0;
+  animation: loc-dropdown-item-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes loc-dropdown-item-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.loc-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 12px;
+  padding: 11px 12px 11px 10px;
+  margin: 2px 0;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: #2c3040;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background 0.22s ease,
+    color 0.22s ease,
+    transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.22s ease;
+}
+
+.loc-dropdown-item:hover {
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.1) 0%, rgba(124, 58, 237, 0.04) 100%);
+  transform: translateX(2px);
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.08);
+}
+
+.loc-dropdown-item:active {
+  transform: scale(0.98) translateX(2px);
+}
+
+.loc-dropdown-item.is-selected {
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.16) 0%, rgba(124, 58, 237, 0.06) 100%);
+  color: #4c1d95;
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 #7c3aed;
+}
+
+.loc-dropdown-item-check {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 800;
+  color: #7c3aed;
+  opacity: 0;
+  transform: scale(0.4);
+  transition:
+    opacity 0.2s ease,
+    transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.loc-dropdown-item.is-selected .loc-dropdown-item-check {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.loc-dropdown-item:not(.is-selected) .loc-dropdown-item-check {
+  color: transparent;
+}
+
+.loc-dropdown-item-label {
+  flex: 1;
+  min-width: 0;
 }
 
 .apps-grid {
@@ -834,7 +1051,7 @@ body {
   margin-top: 22px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
 }
 
 .app-users {
@@ -880,16 +1097,32 @@ body {
   height: 34px;
   padding: 0;
   border: 0;
-  background: transparent;
+  border-radius: 999px;
+  background: #1f1f22;
+  color: #fff;
   display: grid;
   place-items: center;
   cursor: pointer;
+  transition: background-color 0.15s ease;
 }
 
-.app-open-btn img {
-  width: 34px;
-  height: 34px;
-  display: block;
+.app-open-btn.can-open:hover {
+  background: #1f9d55;
+}
+
+.app-open-btn.no-access:hover {
+  background: #d92d20;
+}
+
+.app-open-btn.is-disabled {
+  background: #a7aab3;
+}
+
+.app-open-arrow {
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 700;
+  transform: translateX(0.5px);
 }
 
 .app-open-btn:disabled {

@@ -115,6 +115,15 @@ function resolveRedirectUri() {
   return resolveKeycloakLoginRedirectUri()
 }
 
+/** OIDC scopes requested during browser login. */
+function resolveKeycloakRequestedScope() {
+  const fromEnv = import.meta.env.VITE_KEYCLOAK_SCOPE?.trim()
+  if (fromEnv) {
+    return fromEnv
+  }
+  return 'openid email profile location-scope'
+}
+
 function resolvePostLogoutRedirectUri() {
   return (
     import.meta.env.VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI?.trim() ||
@@ -341,7 +350,10 @@ export async function loginWithKeycloak() {
 
   wireKeycloakSessionSync(keycloak)
 
-  const href = await keycloak.createLoginUrl({ redirectUri: resolveRedirectUri() })
+  const href = await keycloak.createLoginUrl({
+    redirectUri: resolveRedirectUri(),
+    scope: resolveKeycloakRequestedScope(),
+  })
   window.location.assign(href)
 }
 
@@ -613,6 +625,206 @@ export function getCurrentUserDisplayName() {
     typeof parsed.preferred_username === 'string' ? parsed.preferred_username : ''
   const email = typeof parsed.email === 'string' ? parsed.email : ''
   return name || preferredUsername || email
+}
+
+/** Designation from token claim (e.g. "DRIVER (PV)"). */
+export function getCurrentUserDesignation() {
+  const accessDesignation = (keycloak?.tokenParsed as { designation?: unknown } | undefined)
+    ?.designation
+  if (typeof accessDesignation === 'string' && accessDesignation.trim()) {
+    return accessDesignation.trim()
+  }
+  const idDesignation = (keycloak?.idTokenParsed as { designation?: unknown } | undefined)
+    ?.designation
+  if (typeof idDesignation === 'string' && idDesignation.trim()) {
+    return idDesignation.trim()
+  }
+  return ''
+}
+
+/** OIDC authorized party (`azp`) from token, typically the client/application identifier. */
+export function getCurrentAuthorizedParty() {
+  const accessAzp = (keycloak?.tokenParsed as { azp?: unknown } | undefined)?.azp
+  if (typeof accessAzp === 'string' && accessAzp.trim()) {
+    return accessAzp.trim()
+  }
+  const idAzp = (keycloak?.idTokenParsed as { azp?: unknown } | undefined)?.azp
+  if (typeof idAzp === 'string' && idAzp.trim()) {
+    return idAzp.trim()
+  }
+  return ''
+}
+
+/**
+ * Parses `locations` from the access token claim (same source as Keycloak user attributes when mapped).
+ * Supports: string[], a single comma/semicolon/pipe-separated string, or JSON array string.
+ */
+function parseLocationsClaim(raw: unknown): string[] {
+  if (raw === undefined || raw === null) {
+    return []
+  }
+  if (Array.isArray(raw)) {
+    return raw
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
+  if (typeof raw !== 'string') {
+    return []
+  }
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return []
+  }
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsedJson = JSON.parse(trimmed) as unknown
+      if (Array.isArray(parsedJson)) {
+        return parsedJson
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      }
+    } catch {
+      // Fall through to delimiter split below.
+    }
+  }
+  return trimmed
+    .split(/[,;|]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+type TokenWithLocationClaims = KeycloakTokenParsed & {
+  locations?: unknown
+  location?: unknown
+  Locations?: unknown
+  attributes?: { locations?: unknown; location?: unknown }
+  user_attributes?: { locations?: unknown; location?: unknown }
+}
+
+type ResourceAccessEntry = {
+  roles?: unknown
+  locations?: unknown
+  location?: unknown
+}
+
+type TokenWithResourceAccessClaims = KeycloakTokenParsed & {
+  resource_access?: Record<string, ResourceAccessEntry>
+}
+
+function extractLocationsFromParsedToken(parsed: TokenWithLocationClaims | undefined) {
+  if (!parsed) {
+    return []
+  }
+  const candidates: unknown[] = [
+    parsed.locations,
+    parsed.location,
+    parsed.Locations,
+    parsed.attributes?.locations,
+    parsed.attributes?.location,
+    parsed.user_attributes?.locations,
+    parsed.user_attributes?.location,
+  ]
+  const out = new Set<string>()
+  for (const candidate of candidates) {
+    for (const location of parseLocationsClaim(candidate)) {
+      out.add(location)
+    }
+  }
+  return [...out]
+}
+
+function parseLocationsFromUnknownObject(payload: unknown) {
+  if (typeof payload !== 'object' || payload === null) {
+    return []
+  }
+  const parsed = payload as TokenWithLocationClaims
+  return extractLocationsFromParsedToken(parsed)
+}
+
+export type ClientAccessClaims = {
+  roles: string[]
+  locations: string[]
+}
+
+/** Per-client roles/locations from token `resource_access.<client_id>.*` claims. */
+export function getCurrentClientAccessClaims() {
+  const parsed = keycloak?.tokenParsed as TokenWithResourceAccessClaims | undefined
+  if (!parsed?.resource_access) {
+    return {} as Record<string, ClientAccessClaims>
+  }
+  const out: Record<string, ClientAccessClaims> = {}
+  for (const [clientId, entry] of Object.entries(parsed.resource_access)) {
+    const roles = Array.isArray(entry.roles)
+      ? entry.roles.filter((item): item is string => typeof item === 'string')
+      : []
+    const locations = parseLocationsClaim(entry.locations).concat(
+      parseLocationsClaim(entry.location),
+    )
+    out[clientId] = {
+      roles: [...new Set(roles.map((role) => role.trim()).filter(Boolean))],
+      locations: [...new Set(locations.map((location) => location.trim()).filter(Boolean))],
+    }
+  }
+  return out
+}
+
+/** Locations from token claims mapped by Keycloak (access token first, then id token fallback). */
+export function getCurrentUserLocations() {
+  if (!keycloak) {
+    return []
+  }
+  const fromAccessToken = extractLocationsFromParsedToken(
+    keycloak.tokenParsed as TokenWithLocationClaims | undefined,
+  )
+  if (fromAccessToken.length > 0) {
+    return fromAccessToken
+  }
+  const fromIdTokenParsed = extractLocationsFromParsedToken(
+    keycloak.idTokenParsed as TokenWithLocationClaims | undefined,
+  )
+  if (fromIdTokenParsed.length > 0) {
+    return fromIdTokenParsed
+  }
+  // Final fallback: decode raw JWT payloads in case runtime parsed objects omit custom claims.
+  const fromAccessTokenRaw = extractLocationsFromParsedToken(
+    keycloak.token ? (decodeJwt(keycloak.token) as TokenWithLocationClaims) : undefined,
+  )
+  if (fromAccessTokenRaw.length > 0) {
+    return fromAccessTokenRaw
+  }
+  return extractLocationsFromParsedToken(
+    keycloak.idToken ? (decodeJwt(keycloak.idToken) as TokenWithLocationClaims) : undefined,
+  )
+}
+
+/** Fetches locations from OIDC userinfo endpoint (runtime fallback when token omits custom claims). */
+export async function fetchCurrentUserLocationsFromUserInfo() {
+  const config = getKeycloakConfig()
+  const token = keycloak?.token
+  if (!config || !token) {
+    return []
+  }
+  try {
+    const response = await fetch(
+      `${config.url}/realms/${encodeURIComponent(config.realm)}/protocol/openid-connect/userinfo`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      },
+    )
+    if (!response.ok) {
+      return []
+    }
+    const payload = (await response.json()) as unknown
+    return parseLocationsFromUnknownObject(payload)
+  } catch {
+    return []
+  }
 }
 
 function normalizeRoles(value: string | undefined) {

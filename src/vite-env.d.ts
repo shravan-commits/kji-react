@@ -30,6 +30,7 @@ interface ImportMetaEnv {
   readonly VITE_KEYCLOAK_URL?: string
   readonly VITE_KEYCLOAK_REALM?: string
   readonly VITE_KEYCLOAK_CLIENT_ID?: string
+  readonly VITE_KEYCLOAK_SCOPE?: string
   readonly VITE_KEYCLOAK_REDIRECT_URI?: string
   readonly VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI?: string
   /** When true/1/yes, Keycloak session iframe polling detects SSO logout from other tabs (test cookie policies). */

@@ -4,6 +4,7 @@ import { FrappeProvider, useFrappeGetDocList } from 'frappe-react-sdk'
 import {
   fetchCurrentUserLocationsFromUserInfo,
   getCurrentClientAccessClaims,
+  getCurrentUserCompany,
   getCurrentUserDisplayName,
   getCurrentUserDesignation,
   getCurrentUserLabel,
@@ -77,7 +78,7 @@ function toLocationKey(value: string) {
   if (!cleaned) {
     return ''
   }
-  // Backend sometimes emits "TRISSUR" while app config uses "Thrissur".
+  // Backend and token claims may emit TRISSUR, Thrissur, THRISSUR, or trissur.
   if (cleaned === 'trissur' || cleaned === 'thrissur') {
     return 'thrissur'
   }
@@ -112,6 +113,82 @@ const TEMP_APPLICATION_LOCATIONS = [
   'Hyderabad',
   'Coimbatore',
 ] as const
+
+function resolveLocationDisplayName(value: string) {
+  const key = toLocationKey(value)
+  const match = TEMP_APPLICATION_LOCATIONS.find(
+    (locationName) => toLocationKey(locationName) === key,
+  )
+  return match ?? value.trim()
+}
+
+function appendUniqueUserLocations(locations: string[], extras: string[]) {
+  const keys = new Set(locations.map((location) => toLocationKey(location)))
+  const out = [...locations]
+  for (const extra of extras) {
+    const trimmed = extra.trim()
+    const key = toLocationKey(trimmed)
+    if (!key || keys.has(key)) {
+      continue
+    }
+    keys.add(key)
+    out.push(trimmed)
+  }
+  return out
+}
+
+function getApplicationLocations(
+  app: ApplicationCard,
+  clientAccessClaims: ReturnType<typeof getCurrentClientAccessClaims>,
+) {
+  const clientId = getClientIdFromLaunchUrl(app.launchUrl)
+  const clientLocations = clientId ? clientAccessClaims[clientId]?.locations || [] : []
+  const rawLocations = clientLocations.length > 0 ? clientLocations : app.locations || []
+  const locations = new Map<string, string>()
+  for (const locationName of rawLocations) {
+    const key = toLocationKey(locationName)
+    if (key && !locations.has(key)) {
+      locations.set(key, resolveLocationDisplayName(locationName))
+    }
+  }
+  return [...locations.entries()].map(([key, label]) => ({ key, label }))
+}
+
+type ApplicationAccessDenialReason = 'role' | 'location'
+
+type ApplicationAccessDenial = {
+  reason: ApplicationAccessDenialReason
+  appName: string
+  locationLabel?: string
+}
+
+function matchesApplicationSearch(app: ApplicationCard, search: string) {
+  return app.name.toLowerCase().includes(search.trim().toLowerCase())
+}
+
+function matchesLocationFilter(locationKey: string, selectedLocation: string) {
+  return selectedLocation === 'all' || locationKey === toLocationKey(selectedLocation)
+}
+
+function resolveApplicationAccessDenialMessage(denial: ApplicationAccessDenial) {
+  if (denial.reason === 'location') {
+    if (denial.appName) {
+      return `You do not have location rights for ${denial.appName}${denial.locationLabel ? ` at ${denial.locationLabel}` : ''}.`
+    }
+    if (denial.locationLabel) {
+      return `You have no rights to ${denial.locationLabel}.`
+    }
+    return 'You have no rights to this location.'
+  }
+  if (denial.appName) {
+    return `You do not have permission to access ${denial.appName}${denial.locationLabel ? ` at ${denial.locationLabel}` : ''}.`
+  }
+  return 'You do not have the required application permissions for the selected locations.'
+}
+
+function resolveApplicationAccessDenialStatus(denial: ApplicationAccessDenial) {
+  return denial.reason === 'location' ? 'Location Access Denied' : 'Application Access Denied'
+}
 
 const applications: ApplicationCard[] = [
   {
@@ -148,8 +225,8 @@ const applications: ApplicationCard[] = [
     id: 4,
     name: 'Stock Management',
     usage: 'Stock Usage',
-    status: 'inactive',
-    description: 'This application is currently inactive and not available for use.',
+    status: 'active',
+    description: 'Manage stock levels, transfers, and store-level availability.',
     locations: ['Thrissur', 'Delhi'],
   },
   {
@@ -166,8 +243,8 @@ const applications: ApplicationCard[] = [
     id: 6,
     name: 'Quality Control',
     usage: 'Quality Usage',
-    status: 'inactive',
-    description: 'This application is currently inactive and not available for use.',
+    status: 'active',
+    description: 'Monitor quality checkpoints, non-conformance, and release controls.',
     locations: ['Thrissur'],
   },
 ]
@@ -192,7 +269,8 @@ function PortalApp() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [portalUnavailable, setPortalUnavailable] = useState(false)
-  const [appAccessDenied, setAppAccessDenied] = useState<string | null>(null)
+  const [applicationAccessDenied, setApplicationAccessDenied] =
+    useState<ApplicationAccessDenial | null>(null)
   const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
   const [search, setSearch] = useState('')
   const [selectedLocation, setSelectedLocation] = useState('all')
@@ -480,27 +558,6 @@ function PortalApp() {
     return true
   }
 
-  const openApplication = (app: ApplicationCard) => {
-    if (!app.launchUrl || app.status !== 'active') {
-      return
-    }
-    if (!hasRoleAccessForApplication(app)) {
-      setAppAccessDenied(app.name)
-      return
-    }
-    setAppAccessDenied(null)
-    // Avoid `_blank` alone (some browsers treat it like noopener). Use a unique name + no feature string
-    // so `window.opener` stays usable for Frappe postMessage after logout.
-    const targetName = `kalyan-erp-${app.id}-${Date.now()}`
-    const child = window.open(app.launchUrl, targetName)
-    if (child) {
-      trackedAppWindowsRef.current.push({
-        window: child,
-        logoutUrl: resolveApplicationLogoutUrl(app.launchUrl),
-      })
-    }
-  }
-
   function resolveApplicationLogoutUrl(launchUrl: string) {
     const fallbackOrigin = (() => {
       try {
@@ -554,7 +611,6 @@ function PortalApp() {
     !maintenance &&
     (isNoAccessForced() ||
       noAccessFromQuery ||
-      Boolean(appAccessDenied) ||
       availableApplications.length === 0)
 
   useEffect(() => {
@@ -581,10 +637,20 @@ function PortalApp() {
   const sessionEmail = getCurrentUserLabel()
   const displayName = getCurrentUserDisplayName() || 'User'
   const designation = getCurrentUserDesignation()
+  const defaultCompanyLocation = getCurrentUserCompany()
   const tokenLocations = getCurrentUserLocations()
-  const userLocations = userinfoLocations.length > 0 ? userinfoLocations : tokenLocations
+  const userLocations = appendUniqueUserLocations(
+    userinfoLocations.length > 0 ? userinfoLocations : tokenLocations,
+    defaultCompanyLocation ? [defaultCompanyLocation] : [],
+  )
   const userLocationKeys = [...new Set(userLocations.map((location) => toLocationKey(location)))]
   const locationOptionMap = new Map<string, string>()
+  for (const locationName of userLocations) {
+    const key = toLocationKey(locationName)
+    if (key && !locationOptionMap.has(key)) {
+      locationOptionMap.set(key, resolveLocationDisplayName(locationName))
+    }
+  }
   for (const app of applications) {
     const clientId = getClientIdFromLaunchUrl(app.launchUrl)
     const clientLocations = clientId
@@ -594,12 +660,16 @@ function PortalApp() {
     for (const locationName of effectiveLocations) {
       const key = toLocationKey(locationName)
       if (key && !locationOptionMap.has(key)) {
-        locationOptionMap.set(key, locationName.trim())
+        locationOptionMap.set(key, resolveLocationDisplayName(locationName))
       }
     }
   }
   const normalizedUserLocations = [...locationOptionMap.keys()]
   const locationOptions = [...locationOptionMap.values()]
+  const userHasLocationAccess = (locationKey: string) =>
+    normalizedUserLocations.length > 0 &&
+    normalizedUserLocations.includes(locationKey) &&
+    (userLocationKeys.length === 0 || userLocationKeys.includes(locationKey))
   const locationFilterItems: { value: string; label: string }[] = [
     { value: 'all', label: 'All Locations' },
     ...locationOptions.map((name) => ({ value: name, label: name })),
@@ -609,16 +679,20 @@ function PortalApp() {
       return
     }
     const selectedStillAvailable = locationFilterItems.some(
-      (item) => item.value.toLowerCase() === selectedLocation.toLowerCase(),
+      (item) => toLocationKey(item.value) === toLocationKey(selectedLocation),
     )
     if (!selectedStillAvailable) {
       setSelectedLocation('all')
     }
   }, [locationFilterItems, selectedLocation])
 
+  useEffect(() => {
+    setApplicationAccessDenied(null)
+  }, [selectedLocation, search])
+
   const selectedLocationLabel =
     locationFilterItems.find(
-      (item) => item.value.toLowerCase() === selectedLocation.toLowerCase(),
+      (item) => toLocationKey(item.value) === toLocationKey(selectedLocation),
     )?.label ?? 'All Locations'
   const noAccessProfile = resolveNoAccessProfile({
     sessionEmail,
@@ -626,39 +700,89 @@ function PortalApp() {
   })
   const maintenanceInfo = getMaintenanceInfo()
 
-  const filteredApplications = applications.filter((app) => {
-    const clientId = getClientIdFromLaunchUrl(app.launchUrl)
-    const clientLocations = clientId
-      ? clientAccessClaims[clientId]?.locations || []
-      : []
-    const appLocationNames =
-      clientLocations.length > 0
-        ? clientLocations.map((locationName) => toLocationKey(locationName)).filter(Boolean)
-        : (app.locations || []).map((locationName) => toLocationKey(locationName)).filter(Boolean)
-    const hasUserLocationAccess =
-      normalizedUserLocations.length > 0 &&
-      (userLocationKeys.length === 0 ||
-        appLocationNames.some((locationName) => userLocationKeys.includes(locationName))) &&
-      appLocationNames.some((locationName) =>
-        normalizedUserLocations.includes(locationName),
-      )
-    const matchesSearch = app.name.toLowerCase().includes(search.trim().toLowerCase())
-    const matchesLocation =
-      selectedLocation === 'all' ||
-      appLocationNames.some(
-        (locationName) => locationName === toLocationKey(selectedLocation),
-      )
-    return (
-      hasUserLocationAccess &&
-      matchesSearch &&
-      matchesLocation &&
-      hasRoleAccessForApplication(app)
+  const locationEligibleApplicationCards = applications.flatMap((app) => {
+    if (!matchesApplicationSearch(app, search)) {
+      return []
+    }
+    const visibleLocations = getApplicationLocations(app, clientAccessClaims).filter(
+      (entry) =>
+        matchesLocationFilter(entry.key, selectedLocation) &&
+        userHasLocationAccess(entry.key),
     )
+    return visibleLocations.map((entry) => ({
+      app,
+      locationKey: entry.key,
+      locationLabel: entry.label,
+      hasRoleAccess: hasRoleAccessForApplication(app),
+    }))
   })
-  const locationAccessDenied =
-    selectedLocation !== 'all' &&
-    search.trim().length === 0 &&
-    filteredApplications.length === 0
+  const emptyApplicationListDenial: ApplicationAccessDenialReason | null = (() => {
+    if (search.trim().length > 0 || locationEligibleApplicationCards.length > 0) {
+      return null
+    }
+    const searchedApps = applications.filter((app) => matchesApplicationSearch(app, search))
+    const hasRoleForFilteredLocations = searchedApps.some((app) => {
+      if (!hasRoleAccessForApplication(app)) {
+        return false
+      }
+      return getApplicationLocations(app, clientAccessClaims).some((entry) =>
+        matchesLocationFilter(entry.key, selectedLocation),
+      )
+    })
+    if (hasRoleForFilteredLocations) {
+      return 'location'
+    }
+    if (normalizedUserLocations.length > 0) {
+      return 'role'
+    }
+    return 'location'
+  })()
+  const resolvedApplicationAccessDenied: ApplicationAccessDenial | null =
+    applicationAccessDenied ||
+    (emptyApplicationListDenial
+      ? {
+          reason: emptyApplicationListDenial,
+          appName: '',
+          locationLabel:
+            selectedLocation === 'all' || selectedLocationLabel === 'All Locations'
+              ? undefined
+              : selectedLocationLabel,
+        }
+      : null)
+  const openApplication = (
+    app: ApplicationCard,
+    locationKey: string,
+    locationLabel: string,
+  ) => {
+    if (!app.launchUrl || app.status !== 'active') {
+      return
+    }
+    if (!userHasLocationAccess(locationKey)) {
+      setApplicationAccessDenied({
+        reason: 'location',
+        appName: app.name,
+        locationLabel,
+      })
+      return
+    }
+    if (!hasRoleAccessForApplication(app)) {
+      setApplicationAccessDenied({
+        reason: 'role',
+        appName: app.name,
+        locationLabel,
+      })
+      return
+    }
+    setApplicationAccessDenied(null)
+    const targetName = `kalyan-erp-${app.id}-${Date.now()}`
+    const child = window.open(app.launchUrl, targetName)
+    if (child) {
+      trackedAppWindowsRef.current.push({
+        window: child,
+        logoutUrl: resolveApplicationLogoutUrl(app.launchUrl),
+      })
+    }
+  }
 
   const filteredUsers = users.filter((item) =>
     item.name.toLowerCase().includes(search.trim().toLowerCase()),
@@ -679,7 +803,7 @@ function PortalApp() {
 
   const handleBackToApplicationsDashboard = () => {
     setActiveMenu('applications')
-    setAppAccessDenied(null)
+    setApplicationAccessDenied(null)
     if (location.search) {
       navigate(APPLICATIONS_PATH, { replace: true })
     }
@@ -777,24 +901,20 @@ function PortalApp() {
             />
           ) : null}
 
-          {!maintenance && activeMenu === 'applications' && (noAccess || locationAccessDenied) ? (
+          {!maintenance && activeMenu === 'applications' && (noAccess || resolvedApplicationAccessDenied) ? (
             <NoAccessView
               profile={noAccessProfile}
-              title={locationAccessDenied || appAccessDenied ? 'No Rights' : undefined}
+              title={resolvedApplicationAccessDenied ? 'No Rights' : undefined}
               lead={
-                locationAccessDenied
-                  ? 'You have no rights to this location.'
-                  : appAccessDenied
-                  ? `You do not have permission to access ${appAccessDenied}.`
+                resolvedApplicationAccessDenied
+                  ? resolveApplicationAccessDenialMessage(resolvedApplicationAccessDenied)
                   : noAccessFromQuery
                   ? 'We could not complete sign-in to the selected application.'
                   : undefined
               }
               statusLabel={
-                locationAccessDenied
-                  ? 'Location Access Denied'
-                  : appAccessDenied
-                  ? 'Application Access Denied'
+                resolvedApplicationAccessDenied
+                  ? resolveApplicationAccessDenialStatus(resolvedApplicationAccessDenied)
                   : noAccessFromQuery
                     ? 'Application Access Failed'
                     : undefined
@@ -804,7 +924,7 @@ function PortalApp() {
             />
           ) : null}
 
-          {!maintenance && activeMenu === 'applications' && !(noAccess || locationAccessDenied) ? (
+          {!maintenance && activeMenu === 'applications' && !noAccess && !resolvedApplicationAccessDenied ? (
             <section className="view-wrap">
               <h1>Integrated Applications</h1>
               <p className="view-subtitle">
@@ -813,7 +933,7 @@ function PortalApp() {
               </p>
               <div className="table-toolbar">
                 <h2>
-                  All Applications <span>({filteredApplications.length})</span>
+                  All Applications <span>({locationEligibleApplicationCards.length})</span>
                 </h2>
                 <div className="toolbar-filters">
                   <div className="search-pill">
@@ -871,7 +991,7 @@ function PortalApp() {
                         <div className="loc-dropdown-list" role="presentation">
                           {locationFilterItems.map((item, index) => {
                             const selected =
-                              item.value.toLowerCase() === selectedLocation.toLowerCase()
+                              toLocationKey(item.value) === toLocationKey(selectedLocation)
                             return (
                               <div
                                 key={item.value === 'all' ? 'all' : item.value}
@@ -904,18 +1024,19 @@ function PortalApp() {
                 </div>
               </div>
               <div className="apps-grid">
-                {filteredApplications.map((app) => {
+                {locationEligibleApplicationCards.map(
+                  ({ app, locationKey, locationLabel, hasRoleAccess }) => {
                   const appClientId = getClientIdFromLaunchUrl(app.launchUrl)
                   const cardName = appClientId || app.name
-                  const hasAccess = hasRoleAccessForApplication(app)
+                  const hasFullAccess = hasRoleAccess && userHasLocationAccess(locationKey)
                   const buttonClassName =
                     app.status !== 'active'
                       ? 'app-open-btn is-disabled'
-                      : hasAccess
+                      : hasFullAccess
                         ? 'app-open-btn can-open'
                         : 'app-open-btn no-access'
                   return (
-                  <article key={app.id} className="app-card">
+                  <article key={`${app.id}-${locationKey}`} className="app-card">
                     <div className="app-head">
                       <div className="app-title-wrap">
                         <div className="app-icon">
@@ -935,13 +1056,17 @@ function PortalApp() {
                       </span>
                     </div>
                     <p>{app.description}</p>
+                    <div className="app-locations">
+                      <span className="app-locations-label">Location</span>
+                      <span className="app-locations-list">{locationLabel}</span>
+                    </div>
                     <div className="app-footer">
                       <button
                         className={buttonClassName}
                         type="button"
                         aria-label={`Open ${cardName}`}
                         disabled={app.status !== 'active'}
-                        onClick={() => openApplication(app)}
+                        onClick={() => openApplication(app, locationKey, locationLabel)}
                       >
                         <span className="app-open-arrow" aria-hidden>
                           →

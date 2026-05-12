@@ -699,8 +699,17 @@ type TokenWithLocationClaims = KeycloakTokenParsed & {
   locations?: unknown
   location?: unknown
   Locations?: unknown
-  attributes?: { locations?: unknown; location?: unknown }
-  user_attributes?: { locations?: unknown; location?: unknown }
+  company?: unknown
+  attributes?: {
+    locations?: unknown
+    location?: unknown
+    company?: unknown
+  }
+  user_attributes?: {
+    locations?: unknown
+    location?: unknown
+    company?: unknown
+  }
 }
 
 type ResourceAccessEntry = {
@@ -713,6 +722,49 @@ type TokenWithResourceAccessClaims = KeycloakTokenParsed & {
   resource_access?: Record<string, ResourceAccessEntry>
 }
 
+function normalizeLocationKey(value: string) {
+  const cleaned = value.trim().toLowerCase().replace(/\s+/g, ' ')
+  if (!cleaned) {
+    return ''
+  }
+  if (cleaned === 'trissur' || cleaned === 'thrissur') {
+    return 'thrissur'
+  }
+  return cleaned
+}
+
+function appendUniqueLocations(locations: string[], extras: string[]) {
+  const keys = new Set(locations.map((location) => normalizeLocationKey(location)))
+  const out = [...locations]
+  for (const extra of extras) {
+    const trimmed = extra.trim()
+    const key = normalizeLocationKey(trimmed)
+    if (!key || keys.has(key)) {
+      continue
+    }
+    keys.add(key)
+    out.push(trimmed)
+  }
+  return out
+}
+
+function extractCompanyFromParsedToken(parsed: TokenWithLocationClaims | undefined) {
+  if (!parsed) {
+    return ''
+  }
+  const candidates = [
+    parsed.company,
+    parsed.attributes?.company,
+    parsed.user_attributes?.company,
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim()
+    }
+  }
+  return ''
+}
+
 function extractLocationsFromParsedToken(parsed: TokenWithLocationClaims | undefined) {
   if (!parsed) {
     return []
@@ -721,10 +773,13 @@ function extractLocationsFromParsedToken(parsed: TokenWithLocationClaims | undef
     parsed.locations,
     parsed.location,
     parsed.Locations,
+    parsed.company,
     parsed.attributes?.locations,
     parsed.attributes?.location,
+    parsed.attributes?.company,
     parsed.user_attributes?.locations,
     parsed.user_attributes?.location,
+    parsed.user_attributes?.company,
   ]
   const out = new Set<string>()
   for (const candidate of candidates) {
@@ -770,6 +825,34 @@ export function getCurrentClientAccessClaims() {
   return out
 }
 
+/** Default company location from token claims (e.g. "TRISSUR"). */
+export function getCurrentUserCompany() {
+  if (!keycloak) {
+    return ''
+  }
+  const fromAccessToken = extractCompanyFromParsedToken(
+    keycloak.tokenParsed as TokenWithLocationClaims | undefined,
+  )
+  if (fromAccessToken) {
+    return fromAccessToken
+  }
+  const fromIdToken = extractCompanyFromParsedToken(
+    keycloak.idTokenParsed as TokenWithLocationClaims | undefined,
+  )
+  if (fromIdToken) {
+    return fromIdToken
+  }
+  const fromAccessTokenRaw = extractCompanyFromParsedToken(
+    keycloak.token ? (decodeJwt(keycloak.token) as TokenWithLocationClaims) : undefined,
+  )
+  if (fromAccessTokenRaw) {
+    return fromAccessTokenRaw
+  }
+  return extractCompanyFromParsedToken(
+    keycloak.idToken ? (decodeJwt(keycloak.idToken) as TokenWithLocationClaims) : undefined,
+  )
+}
+
 /** Locations from token claims mapped by Keycloak (access token first, then id token fallback). */
 export function getCurrentUserLocations() {
   if (!keycloak) {
@@ -779,24 +862,25 @@ export function getCurrentUserLocations() {
     keycloak.tokenParsed as TokenWithLocationClaims | undefined,
   )
   if (fromAccessToken.length > 0) {
-    return fromAccessToken
+    return appendUniqueLocations(fromAccessToken, [getCurrentUserCompany()])
   }
   const fromIdTokenParsed = extractLocationsFromParsedToken(
     keycloak.idTokenParsed as TokenWithLocationClaims | undefined,
   )
   if (fromIdTokenParsed.length > 0) {
-    return fromIdTokenParsed
+    return appendUniqueLocations(fromIdTokenParsed, [getCurrentUserCompany()])
   }
   // Final fallback: decode raw JWT payloads in case runtime parsed objects omit custom claims.
   const fromAccessTokenRaw = extractLocationsFromParsedToken(
     keycloak.token ? (decodeJwt(keycloak.token) as TokenWithLocationClaims) : undefined,
   )
   if (fromAccessTokenRaw.length > 0) {
-    return fromAccessTokenRaw
+    return appendUniqueLocations(fromAccessTokenRaw, [getCurrentUserCompany()])
   }
-  return extractLocationsFromParsedToken(
+  const fromIdTokenRaw = extractLocationsFromParsedToken(
     keycloak.idToken ? (decodeJwt(keycloak.idToken) as TokenWithLocationClaims) : undefined,
   )
+  return appendUniqueLocations(fromIdTokenRaw, [getCurrentUserCompany()])
 }
 
 /** Fetches locations from OIDC userinfo endpoint (runtime fallback when token omits custom claims). */
@@ -821,7 +905,12 @@ export async function fetchCurrentUserLocationsFromUserInfo() {
       return []
     }
     const payload = (await response.json()) as unknown
-    return parseLocationsFromUnknownObject(payload)
+    const locations = parseLocationsFromUnknownObject(payload)
+    const company =
+      typeof payload === 'object' && payload !== null
+        ? extractCompanyFromParsedToken(payload as TokenWithLocationClaims)
+        : ''
+    return appendUniqueLocations(locations, [company])
   } catch {
     return []
   }

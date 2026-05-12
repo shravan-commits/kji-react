@@ -15,17 +15,22 @@ body {
 
 .login-page {
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
 }
 
 .branding-panel {
-  background: radial-gradient(circle at top, #1f1242 0%, #0b0722 65%, #05030f 100%);
-  color: #fff;
+  width: 45%;
+  min-height: 100vh;
+  background: linear-gradient(160deg, #1f1242 0%, #0b0722 65%, #05030f 100%);
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 48px;
+  padding: 40px;
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  color: #fff;
 }
 
 .branding-content {
@@ -52,6 +57,8 @@ body {
 }
 
 .form-panel {
+  margin-left: 45%;
+  min-height: 100vh;
   background: #fbfbfc;
   display: flex;
   justify-content: center;
@@ -160,12 +167,14 @@ body {
 }
 
 @media (max-width: 960px) {
-  .login-page {
-    grid-template-columns: 1fr;
+  .branding-panel {
+    position: relative;
+    width: 100%;
+    min-height: 40vh;
   }
 
-  .branding-panel {
-    min-height: 40vh;
+  .form-panel {
+    margin-left: 0;
   }
 
   .login-card h2 {
@@ -1047,6 +1056,27 @@ body {
   min-height: 56px;
 }
 
+.app-locations {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #5f616b;
+}
+
+.app-locations-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #434756;
+}
+
+.app-locations-list {
+  display: block;
+}
+
 .app-footer {
   margin-top: 22px;
   display: flex;
@@ -1090,6 +1120,13 @@ body {
   font-size: 12px;
   color: #111318;
   font-weight: 700;
+}
+
+.app-access-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #6b7280;
 }
 
 .app-open-btn {

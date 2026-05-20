@@ -1,25 +1,42 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { FrappeProvider, useFrappeGetDocList } from 'frappe-react-sdk'
+import { FrappeProvider, useFrappeGetCall } from 'frappe-react-sdk'
 import {
-  fetchCurrentUserLocationsFromUserInfo,
+  getClientIdFromLaunchUrl,
+  registerOpenedApplicationSession,
+  terminateApplicationSessions,
+  type TrackedApplicationWindow,
+} from './applicationSessionLogout'
+import {
+  broadcastCentralPortalLogout,
+  installCentralPortalLogoutBroadcastListener,
+  PORTAL_LOGOUT_SYNC_KEY,
+} from './portalLogoutSync'
+import {
   getCurrentClientAccessClaims,
+  getCurrentUserCompany,
   getCurrentUserDisplayName,
   getCurrentUserDesignation,
   getCurrentUserLabel,
   getCurrentUserLocations,
-  hasCurrentUserAnyRole,
+  getCurrentUserLocationKeys,
+  getKeycloakMixedContentWarning,
   isCentralPortalReachable,
   isKeycloakAuthenticated,
   isKeycloakConfigured,
   isKeycloakUnavailableError,
   forceKeycloakSessionProbeNow,
+  KALYAN_PORTAL_TERMINATE_APP_SESSIONS_EVENT,
   loginWithKeycloak,
   logoutFromKeycloak,
-  resolveRequiredRoles,
+  resolvePortalLogoutLandingUrl,
+  portalLocationSetsIntersect,
+  splitKalyanRoleSpecs,
   subscribeKeycloakSessionLost,
+  userSatisfiesAnyKalyanRoleSpec,
 } from './keycloakAuth'
 import {
+  getFrappeApiLikelyBlocker,
   resolveFrappeEnableSocket,
   resolveFrappePostMessageOrigins,
   resolveFrappeProviderUrl,
@@ -32,15 +49,26 @@ import {
   resolveNoAccessProfile,
 } from './portalState'
 import {
+  parsePortalKeycloakDenial,
+  portalKeycloakDenialLead,
+  portalKeycloakDenialLoginError,
+  stripPortalKeycloakDenialFromSearchAndHash,
+} from './portalKeycloakDenial'
+import {
   CentralPortalUnavailableView,
   FullMaintenanceView,
   NoAccessView,
 } from './portalViews'
+import {
+  CENTRAL_PORTAL_USERS_METHOD,
+  type CentralPortalUsersPayload,
+  mapCentralPortalUsersToRows,
+  resolveCentralPortalUsersCallParams,
+} from './centralPortalUsers'
 import './style.css'
 
 /** Dashboard URL after Keycloak sign-in. */
 const APPLICATIONS_PATH = '/applications' as const
-const PORTAL_LOGOUT_SYNC_KEY = 'kalyan-portal:logout-sync' as const
 
 type MenuKey = 'applications' | 'users'
 
@@ -52,14 +80,15 @@ type ApplicationCard = {
   description: string
   locations?: string[]
   launchUrl?: string
-  requiredRoles?: string[]
+  /** Mirrors Keycloak client {@code kalyan-required-roles} for portal list filtering (optional). */
+  requiredRoles?: string
 }
 
 type UserRow = {
   id: string
   name: string
   type: string
-  status: 'ACTIVE' | 'INACTIVE'
+  status: string
   primaryLocation: string
   locationRights: string
 }
@@ -77,28 +106,11 @@ function toLocationKey(value: string) {
   if (!cleaned) {
     return ''
   }
-  // Backend sometimes emits "TRISSUR" while app config uses "Thrissur".
+  // Backend and token claims may emit TRISSUR, Thrissur, THRISSUR, or trissur.
   if (cleaned === 'trissur' || cleaned === 'thrissur') {
     return 'thrissur'
   }
   return cleaned
-}
-
-function getClientIdFromLaunchUrl(launchUrl?: string) {
-  if (!launchUrl) {
-    return ''
-  }
-  try {
-    const parsed = new URL(launchUrl, window.location.href)
-    return parsed.searchParams.get('client_id')?.trim() || ''
-  } catch {
-    return ''
-  }
-}
-
-type TrackedApplicationWindow = {
-  window: Window
-  logoutUrl: string | null
 }
 
 // Temporary rollout mapping until per-client locations are sourced from final backend setup.
@@ -113,6 +125,76 @@ const TEMP_APPLICATION_LOCATIONS = [
   'Coimbatore',
 ] as const
 
+function resolveLocationDisplayName(value: string) {
+  const key = toLocationKey(value)
+  const match = TEMP_APPLICATION_LOCATIONS.find(
+    (locationName) => toLocationKey(locationName) === key,
+  )
+  return match ?? value.trim()
+}
+
+function getApplicationLocations(
+  app: ApplicationCard,
+  clientAccessClaims: ReturnType<typeof getCurrentClientAccessClaims>,
+) {
+  const clientId = getClientIdFromLaunchUrl(app.launchUrl)
+  const clientLocations = clientId ? clientAccessClaims[clientId]?.locations || [] : []
+  const rawLocations = clientLocations.length > 0 ? clientLocations : app.locations || []
+  const locations = new Map<string, string>()
+  for (const locationName of rawLocations) {
+    const key = toLocationKey(locationName)
+    if (key && !locations.has(key)) {
+      locations.set(key, resolveLocationDisplayName(locationName))
+    }
+  }
+  return [...locations.entries()].map(([key, label]) => ({ key, label }))
+}
+
+function matchesApplicationSearch(app: ApplicationCard, search: string) {
+  return app.name.toLowerCase().includes(search.trim().toLowerCase())
+}
+
+function matchesLocationFilter(locationKey: string, selectedLocation: string) {
+  return selectedLocation === 'all' || locationKey === toLocationKey(selectedLocation)
+}
+
+/**
+ * Mirrors Keycloak {@code ClientApplicationAccessAuthenticator}: if both served locations and
+ * required-role specs are non-empty, both must pass; if only one dimension is configured, only that
+ * check applies; if neither is configured, the app is shown (Keycloak still allows the client).
+ */
+function isApplicationEligibleForUser(
+  app: ApplicationCard,
+  clientAccessClaims: ReturnType<typeof getCurrentClientAccessClaims>,
+): boolean {
+  const clientId = getClientIdFromLaunchUrl(app.launchUrl)
+  const clientLocations = clientId ? clientAccessClaims[clientId]?.locations || [] : []
+  const rawLocations = clientLocations.length > 0 ? clientLocations : app.locations || []
+  const specs = splitKalyanRoleSpecs(app.requiredRoles)
+
+  const wantsLocation = rawLocations.length > 0
+  const wantsRole = specs.length > 0
+  if (!wantsLocation && !wantsRole) {
+    return true
+  }
+
+  const userLocs = getCurrentUserLocations()
+  if (wantsLocation) {
+    if (userLocs.length === 0) {
+      return false
+    }
+    if (!portalLocationSetsIntersect(userLocs, rawLocations)) {
+      return false
+    }
+  }
+
+  if (wantsRole && !userSatisfiesAnyKalyanRoleSpec(specs)) {
+    return false
+  }
+
+  return true
+}
+
 const applications: ApplicationCard[] = [
   {
     id: 1,
@@ -122,7 +204,7 @@ const applications: ApplicationCard[] = [
     description: 'Advanced predictive modeling and data visualization for supply chain management.',
     locations: [...TEMP_APPLICATION_LOCATIONS],
     launchUrl: import.meta.env.VITE_APP_HR_URL,
-    requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_HR_REQUIRED_ROLES),
+    requiredRoles: import.meta.env.VITE_APP_HR_REQUIRED_ROLES,
   },
   {
     id: 2,
@@ -132,7 +214,7 @@ const applications: ApplicationCard[] = [
     description: 'Manage inventory movement, stock health, and warehouse operations from one panel.',
     locations: [...TEMP_APPLICATION_LOCATIONS],
     launchUrl: import.meta.env.VITE_APP_WAREHOUSE_URL,
-    requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_WAREHOUSE_REQUIRED_ROLES),
+    requiredRoles: import.meta.env.VITE_APP_WAREHOUSE_REQUIRED_ROLES,
   },
   {
     id: 3,
@@ -142,14 +224,14 @@ const applications: ApplicationCard[] = [
     description: 'Track opportunities, customer conversion, and regional sales performance in real time.',
     locations: [...TEMP_APPLICATION_LOCATIONS],
     launchUrl: import.meta.env.VITE_APP_SALES_URL,
-    requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_SALES_REQUIRED_ROLES),
+    requiredRoles: import.meta.env.VITE_APP_SALES_REQUIRED_ROLES,
   },
   {
     id: 4,
     name: 'Stock Management',
     usage: 'Stock Usage',
-    status: 'inactive',
-    description: 'This application is currently inactive and not available for use.',
+    status: 'active',
+    description: 'Manage stock levels, transfers, and store-level availability.',
     locations: ['Thrissur', 'Delhi'],
   },
   {
@@ -160,28 +242,17 @@ const applications: ApplicationCard[] = [
     description: 'Control payables, receivables, approvals, and key financial indicators.',
     locations: [...TEMP_APPLICATION_LOCATIONS],
     launchUrl: import.meta.env.VITE_APP_FINANCE_URL,
-    requiredRoles: resolveRequiredRoles(import.meta.env.VITE_APP_FINANCE_REQUIRED_ROLES),
+    requiredRoles: import.meta.env.VITE_APP_FINANCE_REQUIRED_ROLES,
   },
   {
     id: 6,
     name: 'Quality Control',
     usage: 'Quality Usage',
-    status: 'inactive',
-    description: 'This application is currently inactive and not available for use.',
+    status: 'active',
+    description: 'Monitor quality checkpoints, non-conformance, and release controls.',
     locations: ['Thrissur'],
   },
 ]
-
-const usersRequiredRoles = resolveRequiredRoles(
-  import.meta.env.VITE_USER_LIST_REQUIRED_ROLES || 'System Manager',
-)
-
-type FrappeUserDoc = {
-  name: string
-  full_name?: string | null
-  enabled?: number | boolean | null
-  user_type?: string | null
-}
 
 function PortalApp() {
   const navigate = useNavigate()
@@ -192,13 +263,22 @@ function PortalApp() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [portalUnavailable, setPortalUnavailable] = useState(false)
-  const [appAccessDenied, setAppAccessDenied] = useState<string | null>(null)
   const [activeMenu, setActiveMenu] = useState<MenuKey>('applications')
-  const [search, setSearch] = useState('')
+  /** Applications search only — do not reuse for Users or app names filter out every user row. */
+  const [applicationSearch, setApplicationSearch] = useState('')
+  const [userSearch, setUserSearch] = useState('')
   const [selectedLocation, setSelectedLocation] = useState('all')
+  const hasUserTouchedLocationFilterRef = useRef(false)
   const [locationDropdownOpen, setLocationDropdownOpen] = useState(false)
-  const [userinfoLocations, setUserinfoLocations] = useState<string[]>([])
   const locationDropdownRef = useRef<HTMLDivElement>(null)
+
+  /** Navigates tracked app tabs to Frappe sso_logout and fans out to all configured app origins. */
+  const terminateLinkedApplicationSessions = useCallback(() => {
+    const trackedApps = trackedAppWindowsRef.current
+    terminateApplicationSessions(trackedApps)
+    trackedAppWindowsRef.current = trackedApps.filter((entry) => !entry.window.closed)
+  }, [])
+
   const keycloakAuthError = (() => {
     const searchParams = new URLSearchParams(location.search)
     const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''))
@@ -238,20 +318,17 @@ function PortalApp() {
     return out
   })()
 
-  const canViewUserList = hasCurrentUserAnyRole(usersRequiredRoles)
-  const userListSwrKey = activeMenu === 'users' && canViewUserList ? undefined : null
+  const userListRoleSpecs = splitKalyanRoleSpecs(import.meta.env.VITE_USER_LIST_REQUIRED_ROLES)
+  const canViewUsers = userSatisfiesAnyKalyanRoleSpec(userListRoleSpecs)
+  const userListSwrKey = activeMenu === 'users' && canViewUsers ? undefined : null
+  const centralPortalUsersParams = resolveCentralPortalUsersCallParams()
   const {
-    data: userDocs,
+    data: centralPortalUsersPayload,
     isLoading: usersListLoading,
     error: usersListError,
-  } = useFrappeGetDocList<FrappeUserDoc>(
-    'User',
-    {
-      fields: ['name', 'full_name', 'enabled', 'user_type'],
-      filters: [['name', '!=', 'Guest']],
-      limit: 100,
-      orderBy: { field: 'full_name', order: 'asc' },
-    },
+  } = useFrappeGetCall<CentralPortalUsersPayload>(
+    CENTRAL_PORTAL_USERS_METHOD,
+    centralPortalUsersParams,
     userListSwrKey,
     {
       revalidateOnFocus: true,
@@ -260,21 +337,66 @@ function PortalApp() {
     },
   )
 
-  const users: UserRow[] = (userDocs ?? []).map((u) => ({
-    id: u.name,
-    name: (u.full_name || u.name).trim() || u.name,
-    type: (u.user_type || '—').trim(),
-    status:
-      u.enabled === 0 || u.enabled === false ? 'INACTIVE' : 'ACTIVE',
-    primaryLocation: '—',
-    locationRights: '—',
-  }))
+  const users: UserRow[] = mapCentralPortalUsersToRows(
+    centralPortalUsersPayload?.users ?? [],
+  )
+
+  useEffect(() => {
+    const onTerminate = () => {
+      terminateLinkedApplicationSessions()
+    }
+    window.addEventListener(KALYAN_PORTAL_TERMINATE_APP_SESSIONS_EVENT, onTerminate)
+    return () => {
+      window.removeEventListener(KALYAN_PORTAL_TERMINATE_APP_SESSIONS_EVENT, onTerminate)
+    }
+  }, [terminateLinkedApplicationSessions])
 
   useEffect(() => {
     return subscribeKeycloakSessionLost(() => {
+      trackedAppWindowsRef.current = []
+      setActiveMenu('applications')
       setAuthRevision((n) => n + 1)
+      try {
+        const landing = new URL(resolvePortalLogoutLandingUrl())
+        navigate(
+          { pathname: landing.pathname, search: landing.search, hash: '' },
+          { replace: true },
+        )
+      } catch {
+        navigate({ pathname: APPLICATIONS_PATH, search: '?no_access=1', hash: '' }, { replace: true })
+      }
     })
-  }, [])
+  }, [navigate])
+
+  useLayoutEffect(() => {
+    if (!isAuthenticated) {
+      return
+    }
+    if (parsePortalKeycloakDenial(location.search, location.hash) === null) {
+      return
+    }
+    const { search, hash } = stripPortalKeycloakDenialFromSearchAndHash(
+      location.search,
+      location.hash,
+    )
+    const path =
+      location.pathname === '/' || location.pathname === ''
+        ? APPLICATIONS_PATH
+        : location.pathname
+    navigate({ pathname: path, search, hash }, { replace: true })
+  }, [isAuthenticated, location.pathname, location.search, location.hash, navigate])
+
+  useLayoutEffect(() => {
+    if (isAuthenticated) {
+      return
+    }
+    const kind = parsePortalKeycloakDenial(location.search, location.hash)
+    if (kind === null) {
+      return
+    }
+    setError(portalKeycloakDenialLoginError(kind))
+    navigate({ pathname: '/', search: '', hash: '' }, { replace: true })
+  }, [isAuthenticated, location.search, location.hash, navigate])
 
   useEffect(() => {
     if (!locationDropdownOpen) {
@@ -302,22 +424,40 @@ function PortalApp() {
   }, [locationDropdownOpen])
 
   useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key !== PORTAL_LOGOUT_SYNC_KEY || !event.newValue) {
-        return
-      }
+    const onCentralPortalLogout = () => {
+      // Another portal tab or Keycloak ended the SSO session — end ERP tabs from this tab too.
+      terminateLinkedApplicationSessions()
       if (!isKeycloakAuthenticated()) {
         return
       }
       void logoutFromKeycloak().catch(() => {
         setAuthRevision((n) => n + 1)
         setActiveMenu('applications')
-        navigate('/', { replace: true })
+        try {
+          const landing = new URL(resolvePortalLogoutLandingUrl())
+          navigate(
+            { pathname: landing.pathname, search: landing.search, hash: '' },
+            { replace: true },
+          )
+        } catch {
+          navigate('/', { replace: true })
+        }
       })
     }
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== PORTAL_LOGOUT_SYNC_KEY || !event.newValue) {
+        return
+      }
+      onCentralPortalLogout()
+    }
     window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [navigate])
+    const unsubscribeBroadcast =
+      installCentralPortalLogoutBroadcastListener(onCentralPortalLogout)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      unsubscribeBroadcast()
+    }
+  }, [navigate, terminateLinkedApplicationSessions])
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -409,27 +549,11 @@ function PortalApp() {
     if (!isAuthenticated) {
       return
     }
-    // Pull latest role/location claims from backend as soon as the dashboard loads.
+    // Pull latest token claims from Keycloak as soon as the dashboard loads.
     void forceKeycloakSessionProbeNow().finally(() => {
       setAuthRevision((n) => n + 1)
     })
   }, [isAuthenticated])
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      setUserinfoLocations([])
-      return
-    }
-    let cancelled = false
-    void fetchCurrentUserLocationsFromUserInfo().then((locations) => {
-      if (!cancelled) {
-        setUserinfoLocations(locations)
-      }
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [isAuthenticated, authRevision])
 
   const handleLoginWithKeycloak = async () => {
     setError('')
@@ -458,110 +582,41 @@ function PortalApp() {
     setLoading(true)
     const reachable = await isCentralPortalReachable()
     setPortalUnavailable(!reachable)
+    if (reachable) {
+      const { search, hash } = stripPortalKeycloakDenialFromSearchAndHash(
+        location.search,
+        location.hash,
+      )
+      navigate({ pathname: location.pathname || '/', search, hash }, { replace: true })
+    }
     setLoading(false)
   }
 
   const clientAccessClaims = getCurrentClientAccessClaims()
 
-  const hasRoleAccessForApplication = (app: ApplicationCard) => {
-    const requiredRoles = app.requiredRoles || []
-    const clientId = getClientIdFromLaunchUrl(app.launchUrl)
-    const clientRoles = clientId ? clientAccessClaims[clientId]?.roles || [] : []
-    // Required roles should be matched against the full token role surface
-    // (realm_access + all resource_access roles), not just one client bucket.
-    if (requiredRoles.length > 0) {
-      return hasCurrentUserAnyRole(requiredRoles)
-    }
-    // If no explicit required roles are configured, keep a lightweight guard:
-    // app tied to a client should require at least one role in that client.
-    if (clientId) {
-      return clientRoles.length > 0
-    }
-    return true
-  }
-
-  const openApplication = (app: ApplicationCard) => {
-    if (!app.launchUrl || app.status !== 'active') {
-      return
-    }
-    if (!hasRoleAccessForApplication(app)) {
-      setAppAccessDenied(app.name)
-      return
-    }
-    setAppAccessDenied(null)
-    // Avoid `_blank` alone (some browsers treat it like noopener). Use a unique name + no feature string
-    // so `window.opener` stays usable for Frappe postMessage after logout.
-    const targetName = `kalyan-erp-${app.id}-${Date.now()}`
-    const child = window.open(app.launchUrl, targetName)
-    if (child) {
-      trackedAppWindowsRef.current.push({
-        window: child,
-        logoutUrl: resolveApplicationLogoutUrl(app.launchUrl),
-      })
-    }
-  }
-
-  function resolveApplicationLogoutUrl(launchUrl: string) {
-    const fallbackOrigin = (() => {
-      try {
-        return new URL(launchUrl, window.location.href).origin
-      } catch {
-        return null
-      }
-    })()
-    try {
-      const parsed = new URL(launchUrl, window.location.href)
-      const redirectUriParam = parsed.searchParams.get('redirect_uri')
-      if (redirectUriParam) {
-        const redirectUri = new URL(decodeURIComponent(redirectUriParam))
-        return `${redirectUri.origin}/api/method/keycloak_integration.utils.sso_logout?redirect_to=${encodeURIComponent(window.location.origin)}`
-      }
-    } catch {
-      // Fall through to origin-only construction below.
-    }
-    if (!fallbackOrigin) {
-      return null
-    }
-    return `${fallbackOrigin}/api/method/keycloak_integration.utils.sso_logout?redirect_to=${encodeURIComponent(window.location.origin)}`
-  }
-
-  const notifyTrackedAppsToLogout = () => {
-    const trackedApps = trackedAppWindowsRef.current
-    if (trackedApps.length === 0) {
-      return
-    }
-    for (const entry of trackedApps) {
-      if (entry.window.closed || !entry.logoutUrl) {
-        continue
-      }
-      try {
-        // Cross-origin navigation is allowed on a retained window handle and enforces app-side logout.
-        entry.window.location.assign(entry.logoutUrl)
-      } catch {
-        // Ignore per-window navigation errors; central logout still proceeds.
-      }
-    }
-    trackedAppWindowsRef.current = trackedApps.filter((entry) => !entry.window.closed)
-  }
-
   const maintenance = isMaintenanceMode()
-  const availableApplications = applications.filter((app) => app.status === 'active')
+  const eligibleActiveApplications = applications.filter(
+    (app) => app.status === 'active' && isApplicationEligibleForUser(app, clientAccessClaims),
+  )
   const noAccessFromQuery = (() => {
     const value = new URLSearchParams(location.search).get('no_access')?.toLowerCase()
     return value === '1' || value === 'true' || value === 'yes'
   })()
+  const noAppsForUser =
+    !maintenance &&
+    !isNoAccessForced() &&
+    !noAccessFromQuery &&
+    eligibleActiveApplications.length === 0
   const noAccess =
     !maintenance &&
-    (isNoAccessForced() ||
-      noAccessFromQuery ||
-      Boolean(appAccessDenied) ||
-      availableApplications.length === 0)
+    (isNoAccessForced() || noAccessFromQuery || eligibleActiveApplications.length === 0)
 
   useEffect(() => {
     if (!noAccessFromQuery) {
       return
     }
-    // Fan out logout to other portal tabs even when this tab is already unauthenticated.
+    // Central / Keycloak logout landing URL — end ERP tabs and sync other portal tabs.
+    terminateLinkedApplicationSessions()
     try {
       localStorage.setItem(PORTAL_LOGOUT_SYNC_KEY, String(Date.now()))
     } catch {
@@ -576,49 +631,59 @@ function PortalApp() {
       setActiveMenu('applications')
       navigate('/', { replace: true })
     })
-  }, [isAuthenticated, navigate, noAccessFromQuery])
+  }, [isAuthenticated, navigate, noAccessFromQuery, terminateLinkedApplicationSessions])
 
   const sessionEmail = getCurrentUserLabel()
   const displayName = getCurrentUserDisplayName() || 'User'
   const designation = getCurrentUserDesignation()
-  const tokenLocations = getCurrentUserLocations()
-  const userLocations = userinfoLocations.length > 0 ? userinfoLocations : tokenLocations
-  const userLocationKeys = [...new Set(userLocations.map((location) => toLocationKey(location)))]
   const locationOptionMap = new Map<string, string>()
-  for (const app of applications) {
-    const clientId = getClientIdFromLaunchUrl(app.launchUrl)
-    const clientLocations = clientId
-      ? clientAccessClaims[clientId]?.locations || []
-      : []
-    const effectiveLocations = clientLocations.length > 0 ? clientLocations : userLocations
-    for (const locationName of effectiveLocations) {
-      const key = toLocationKey(locationName)
-      if (key && !locationOptionMap.has(key)) {
-        locationOptionMap.set(key, locationName.trim())
-      }
+  for (const locationName of getCurrentUserLocations()) {
+    const key = toLocationKey(locationName)
+    if (key && !locationOptionMap.has(key)) {
+      locationOptionMap.set(key, resolveLocationDisplayName(locationName))
     }
   }
-  const normalizedUserLocations = [...locationOptionMap.keys()]
   const locationOptions = [...locationOptionMap.values()]
   const locationFilterItems: { value: string; label: string }[] = [
     { value: 'all', label: 'All Locations' },
     ...locationOptions.map((name) => ({ value: name, label: name })),
   ]
+  const defaultCompanyLocation = resolveLocationDisplayName(getCurrentUserCompany())
+  const defaultCompanyFilterValue =
+    locationFilterItems.find(
+      (item) => toLocationKey(item.value) === toLocationKey(defaultCompanyLocation),
+    )?.value ?? ''
+
   useEffect(() => {
-    if (selectedLocation === 'all') {
+    if (hasUserTouchedLocationFilterRef.current) {
       return
     }
-    const selectedStillAvailable = locationFilterItems.some(
-      (item) => item.value.toLowerCase() === selectedLocation.toLowerCase(),
-    )
-    if (!selectedStillAvailable) {
-      setSelectedLocation('all')
+    if (selectedLocation !== 'all') {
+      return
     }
-  }, [locationFilterItems, selectedLocation])
+    if (!defaultCompanyFilterValue) {
+      return
+    }
+    setSelectedLocation(defaultCompanyFilterValue)
+  }, [defaultCompanyFilterValue, selectedLocation])
+
+  useEffect(() => {
+    const selectedStillAvailable = locationFilterItems.some(
+      (item) => toLocationKey(item.value) === toLocationKey(selectedLocation),
+    )
+    if (selectedStillAvailable) {
+      return
+    }
+    if (defaultCompanyFilterValue) {
+      setSelectedLocation(defaultCompanyFilterValue)
+      return
+    }
+    setSelectedLocation('all')
+  }, [defaultCompanyFilterValue, locationFilterItems, selectedLocation])
 
   const selectedLocationLabel =
     locationFilterItems.find(
-      (item) => item.value.toLowerCase() === selectedLocation.toLowerCase(),
+      (item) => toLocationKey(item.value) === toLocationKey(selectedLocation),
     )?.label ?? 'All Locations'
   const noAccessProfile = resolveNoAccessProfile({
     sessionEmail,
@@ -626,47 +691,74 @@ function PortalApp() {
   })
   const maintenanceInfo = getMaintenanceInfo()
 
-  const filteredApplications = applications.filter((app) => {
-    const clientId = getClientIdFromLaunchUrl(app.launchUrl)
-    const clientLocations = clientId
-      ? clientAccessClaims[clientId]?.locations || []
-      : []
-    const appLocationNames =
-      clientLocations.length > 0
-        ? clientLocations.map((locationName) => toLocationKey(locationName)).filter(Boolean)
-        : (app.locations || []).map((locationName) => toLocationKey(locationName)).filter(Boolean)
-    const hasUserLocationAccess =
-      normalizedUserLocations.length > 0 &&
-      (userLocationKeys.length === 0 ||
-        appLocationNames.some((locationName) => userLocationKeys.includes(locationName))) &&
-      appLocationNames.some((locationName) =>
-        normalizedUserLocations.includes(locationName),
-      )
-    const matchesSearch = app.name.toLowerCase().includes(search.trim().toLowerCase())
-    const matchesLocation =
-      selectedLocation === 'all' ||
-      appLocationNames.some(
-        (locationName) => locationName === toLocationKey(selectedLocation),
-      )
+  const userLocationKeys = getCurrentUserLocationKeys()
+  const locationEligibleApplicationCards = applications.flatMap((app) => {
+    if (!isApplicationEligibleForUser(app, clientAccessClaims)) {
+      return []
+    }
+    if (!matchesApplicationSearch(app, applicationSearch)) {
+      return []
+    }
+    const visibleLocations = getApplicationLocations(app, clientAccessClaims).filter(
+      (entry) =>
+        userLocationKeys.has(entry.key) &&
+        matchesLocationFilter(entry.key, selectedLocation),
+    )
+    return visibleLocations.map((entry) => ({
+      app,
+      locationKey: entry.key,
+      locationLabel: entry.label,
+    }))
+  })
+  const openApplication = (
+    app: ApplicationCard,
+    locationKey: string,
+    _locationLabel: string,
+  ) => {
+    if (!app.launchUrl || app.status !== 'active') {
+      return
+    }
+    if (!isApplicationEligibleForUser(app, getCurrentClientAccessClaims())) {
+      return
+    }
+    if (!getCurrentUserLocationKeys().has(locationKey)) {
+      return
+    }
+    const targetName = `kalyan-erp-${app.id}-${locationKey}-${Date.now()}`
+    registerOpenedApplicationSession(app.launchUrl)
+    // No noopener/noreferrer so ERP tabs can postMessage this portal on their logout.
+    const child = window.open(app.launchUrl, targetName)
+    if (child) {
+      trackedAppWindowsRef.current.push({
+        window: child,
+        launchUrl: app.launchUrl,
+      })
+    }
+  }
+
+  const userSearchNeedle = userSearch.trim().toLowerCase()
+  const filteredUsers = users.filter((item) => {
+    if (!userSearchNeedle) {
+      return true
+    }
     return (
-      hasUserLocationAccess &&
-      matchesSearch &&
-      matchesLocation &&
-      hasRoleAccessForApplication(app)
+      item.name.toLowerCase().includes(userSearchNeedle) ||
+      item.id.toLowerCase().includes(userSearchNeedle)
     )
   })
-  const locationAccessDenied =
-    selectedLocation !== 'all' &&
-    search.trim().length === 0 &&
-    filteredApplications.length === 0
 
-  const filteredUsers = users.filter((item) =>
-    item.name.toLowerCase().includes(search.trim().toLowerCase()),
-  )
+  const frappeUserListErrorLead = (() => {
+    const hint = getFrappeApiLikelyBlocker()
+    const base =
+      'Keycloak role checks passed, but loading central portal users failed. Typical causes: calling Frappe on another origin without CORS/cookies, or HTTPS portal vs HTTP Frappe. Try VITE_FRAPPE_SAME_ORIGIN_API=true so requests go to /api on this host (Vite or nginx proxies to VITE_FRAPPE_BASE_URL), or configure Frappe CORS + HTTPS, or use a server-side token.'
+    return hint ? `${base} ${hint}` : base
+  })()
 
   const handlePortalLogout = async () => {
     setError('')
-    notifyTrackedAppsToLogout()
+    broadcastCentralPortalLogout()
+    // Same user gesture as Keycloak logout — end ERP/Keycloak app tabs immediately (event also fires inside logoutFromKeycloak).
+    terminateLinkedApplicationSessions()
     try {
       await logoutFromKeycloak()
     } catch {
@@ -679,10 +771,7 @@ function PortalApp() {
 
   const handleBackToApplicationsDashboard = () => {
     setActiveMenu('applications')
-    setAppAccessDenied(null)
-    if (location.search) {
-      navigate(APPLICATIONS_PATH, { replace: true })
-    }
+    navigate({ pathname: APPLICATIONS_PATH, search: '', hash: '' }, { replace: true })
   }
 
   if (isAuthenticated) {
@@ -777,34 +866,31 @@ function PortalApp() {
             />
           ) : null}
 
-          {!maintenance && activeMenu === 'applications' && (noAccess || locationAccessDenied) ? (
+          {!maintenance && activeMenu === 'applications' && noAccess ? (
             <NoAccessView
               profile={noAccessProfile}
-              title={locationAccessDenied || appAccessDenied ? 'No Rights' : undefined}
+              title={undefined}
               lead={
-                locationAccessDenied
-                  ? 'You have no rights to this location.'
-                  : appAccessDenied
-                  ? `You do not have permission to access ${appAccessDenied}.`
-                  : noAccessFromQuery
+                noAccessFromQuery
                   ? 'We could not complete sign-in to the selected application.'
-                  : undefined
-              }
-              statusLabel={
-                locationAccessDenied
-                  ? 'Location Access Denied'
-                  : appAccessDenied
-                  ? 'Application Access Denied'
-                  : noAccessFromQuery
-                    ? 'Application Access Failed'
+                  : noAppsForUser
+                    ? 'No integrated applications match your allowed locations and roles for this portal. Sign-in to each app is enforced in Keycloak; contact your administrator if you need access.'
                     : undefined
               }
+              statusLabel={
+                noAccessFromQuery
+                  ? 'Application Access Failed'
+                  : noAppsForUser
+                    ? 'Application access not granted'
+                    : undefined
+              }
+              showBackToPortal={!noAccessFromQuery}
               onBackToPortal={handleBackToApplicationsDashboard}
               onLogout={handlePortalLogout}
             />
           ) : null}
 
-          {!maintenance && activeMenu === 'applications' && !(noAccess || locationAccessDenied) ? (
+          {!maintenance && activeMenu === 'applications' && !noAccess ? (
             <section className="view-wrap">
               <h1>Integrated Applications</h1>
               <p className="view-subtitle">
@@ -813,7 +899,7 @@ function PortalApp() {
               </p>
               <div className="table-toolbar">
                 <h2>
-                  All Applications <span>({filteredApplications.length})</span>
+                  All Applications <span>({locationEligibleApplicationCards.length})</span>
                 </h2>
                 <div className="toolbar-filters">
                   <div className="search-pill">
@@ -821,8 +907,8 @@ function PortalApp() {
                       className="search-pill-input"
                       type="search"
                       placeholder="Search application"
-                      value={search}
-                      onChange={(event) => setSearch(event.target.value)}
+                      value={applicationSearch}
+                      onChange={(event) => setApplicationSearch(event.target.value)}
                       aria-label="Search applications"
                     />
                     <button
@@ -871,7 +957,7 @@ function PortalApp() {
                         <div className="loc-dropdown-list" role="presentation">
                           {locationFilterItems.map((item, index) => {
                             const selected =
-                              item.value.toLowerCase() === selectedLocation.toLowerCase()
+                              toLocationKey(item.value) === toLocationKey(selectedLocation)
                             return (
                               <div
                                 key={item.value === 'all' ? 'all' : item.value}
@@ -885,6 +971,7 @@ function PortalApp() {
                                   aria-selected={selected}
                                   className={`loc-dropdown-item ${selected ? 'is-selected' : ''}`}
                                   onClick={() => {
+                                    hasUserTouchedLocationFilterRef.current = true
                                     setSelectedLocation(item.value)
                                     setLocationDropdownOpen(false)
                                   }}
@@ -904,18 +991,13 @@ function PortalApp() {
                 </div>
               </div>
               <div className="apps-grid">
-                {filteredApplications.map((app) => {
+                {locationEligibleApplicationCards.map(({ app, locationKey, locationLabel }) => {
                   const appClientId = getClientIdFromLaunchUrl(app.launchUrl)
                   const cardName = appClientId || app.name
-                  const hasAccess = hasRoleAccessForApplication(app)
                   const buttonClassName =
-                    app.status !== 'active'
-                      ? 'app-open-btn is-disabled'
-                      : hasAccess
-                        ? 'app-open-btn can-open'
-                        : 'app-open-btn no-access'
+                    app.status !== 'active' ? 'app-open-btn is-disabled' : 'app-open-btn can-open'
                   return (
-                  <article key={app.id} className="app-card">
+                  <article key={`${app.id}-${locationKey}`} className="app-card">
                     <div className="app-head">
                       <div className="app-title-wrap">
                         <div className="app-icon">
@@ -935,13 +1017,17 @@ function PortalApp() {
                       </span>
                     </div>
                     <p>{app.description}</p>
+                    <div className="app-locations">
+                      <span className="app-locations-label">Location</span>
+                      <span className="app-locations-list">{locationLabel}</span>
+                    </div>
                     <div className="app-footer">
                       <button
                         className={buttonClassName}
                         type="button"
                         aria-label={`Open ${cardName}`}
                         disabled={app.status !== 'active'}
-                        onClick={() => openApplication(app)}
+                        onClick={() => openApplication(app, locationKey, locationLabel)}
                       >
                         <span className="app-open-arrow" aria-hidden>
                           →
@@ -956,21 +1042,23 @@ function PortalApp() {
           ) : null}
 
           {!maintenance && activeMenu === 'users' ? (
-            !canViewUserList ? (
+            !canViewUsers ? (
               <NoAccessView
                 profile={noAccessProfile}
-                title="No Rights"
-                lead="You do not have permission to access the Users section."
-                statusLabel="Users Access Denied"
+                title="Access not granted"
+                lead={portalKeycloakDenialLead('location')}
+                statusLabel="Location access not granted"
+                showBackToPortal
                 onBackToPortal={handleBackToApplicationsDashboard}
                 onLogout={handlePortalLogout}
               />
             ) : usersListError ? (
               <NoAccessView
                 profile={noAccessProfile}
-                title="No Rights"
-                lead="We could not validate your access to the Users section right now."
-                statusLabel="Access Validation Failed"
+                title="Could not load users"
+                lead={frappeUserListErrorLead}
+                statusLabel="ERP / Frappe request failed"
+                showBackToPortal={!noAccess}
                 onBackToPortal={handleBackToApplicationsDashboard}
                 onLogout={handlePortalLogout}
               />
@@ -990,8 +1078,8 @@ function PortalApp() {
                         className="search-pill-input"
                         type="search"
                         placeholder="Search user"
-                        value={search}
-                        onChange={(event) => setSearch(event.target.value)}
+                        value={userSearch}
+                        onChange={(event) => setUserSearch(event.target.value)}
                         aria-label="Search users"
                       />
                       <button
@@ -1066,7 +1154,11 @@ function PortalApp() {
                       {!usersListLoading && !usersListError && filteredUsers.length === 0 ? (
                         <tr>
                           <td colSpan={7} className="user-list-status">
-                            No users found.
+                            {users.length === 0
+                              ? 'ERP returned no users for this account (check Frappe permissions on User, or raise the list limit).'
+                              : userSearchNeedle
+                                ? 'No users match your search. Clear the search box or try Portal UID / name.'
+                                : 'No users found.'}
                           </td>
                         </tr>
                       ) : null}
@@ -1139,6 +1231,9 @@ function PortalApp() {
             </p>
 
             {error ? <p className="error-text">{error}</p> : null}
+            {getKeycloakMixedContentWarning() ? (
+              <p className="error-text">{getKeycloakMixedContentWarning()}</p>
+            ) : null}
 
             <button
               className="login-btn"

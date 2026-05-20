@@ -26,8 +26,27 @@
         "http://localhost:5173/applications/*"
       ],
       "webOrigins": ["http://localhost:5173", "+"],
+      "frontchannelLogout": true,
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*##http://localhost:5173/applications?no_access=1"
+      }
+    },
+    {
+      "clientId": "frappe-client",
+      "name": "Frappe ERP (Keycloak SSO)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "frontchannelLogout": true,
+      "redirectUris": [
+        "http://localhost:8001/*",
+        "http://127.0.0.1:8001/*"
+      ],
+      "webOrigins": ["+"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8001/*##http://127.0.0.1:8001/*"
       }
     }
   ]

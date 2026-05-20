@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import type { ProxyOptions } from 'vite'
 
 /** Vite dev proxy: forward Frappe paths to the local bench webserver port. */
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -54,6 +55,7 @@ function resolveFrappeTargetOrigin(): string {
     process.env.FRAPPE_TARGET_URL?.trim() ||
     process.env.VITE_FRAPPE_URL?.trim() ||
     process.env.VITE_FRAPPE_BASE_URL?.trim() ||
+    readDotEnvValue('FRAPPE_TARGET_URL') ||
     readDotEnvValue('VITE_FRAPPE_URL') ||
     readDotEnvValue('VITE_FRAPPE_BASE_URL')
   if (direct) {
@@ -64,17 +66,31 @@ function resolveFrappeTargetOrigin(): string {
 
 const frappeTargetOrigin = resolveFrappeTargetOrigin()
 
-// Require a segment boundary after `app` (etc.) so `/applications` is not proxied to Frappe.
-export default {
-  '^/(app|api|assets|files|private)(/|$)': {
-    target: frappeTargetOrigin,
-    ws: true,
-    router(req: { headers: { host?: string } }) {
-      if (frappeTargetOrigin !== `http://127.0.0.1:${webserver_port}`) {
-        return frappeTargetOrigin
-      }
-      const site_name = req.headers.host?.split(':')[0] ?? '127.0.0.1'
-      return `http://${site_name}:${webserver_port}`
-    },
+/**
+ * Vite matches proxy keys with `url.startsWith(context)` unless the key starts with `^` (regex).
+ * A single broad regex can fail to register or match as expected; `/api` must always hit Frappe
+ * so `/api/method/...` is never answered with the SPA `index.html`.
+ */
+const frappeProxy: ProxyOptions = {
+  target: frappeTargetOrigin,
+  /** Frappe resolves the site from the Host header; without this, requests keep :5173 and the wrong site can load. */
+  changeOrigin: true,
+  ws: true,
+  router(req: { headers: { host?: string } }) {
+    if (frappeTargetOrigin !== `http://127.0.0.1:${webserver_port}`) {
+      return frappeTargetOrigin
+    }
+    const site_name = req.headers.host?.split(':')[0] ?? '127.0.0.1'
+    return `http://${site_name}:${webserver_port}`
   },
 }
+
+export default {
+  '/api': frappeProxy,
+  '/assets': frappeProxy,
+  '/files': frappeProxy,
+  '/private': frappeProxy,
+  /** Frappe desk routes; regex avoids catching the SPA route `/applications`. */
+  '^/app/': frappeProxy,
+  '^/app$': frappeProxy,
+} satisfies Record<string, ProxyOptions>

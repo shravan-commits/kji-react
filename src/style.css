@@ -1575,6 +1575,10 @@ tbody td {
   align-items: stretch;
 }
 
+.portal-state-btn-row.logout-only .portal-state-btn {
+  grid-column: 2;
+}
+
 .portal-state-btn {
   display: inline-flex;
   align-items: center;

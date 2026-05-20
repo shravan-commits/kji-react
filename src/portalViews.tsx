@@ -4,6 +4,7 @@ type NoAccessViewProps = {
   profile: NoAccessProfile
   onBackToPortal: () => void
   onLogout: () => void
+  showBackToPortal?: boolean
   title?: string
   lead?: string
   statusLabel?: string
@@ -13,6 +14,7 @@ export function NoAccessView({
   profile,
   onBackToPortal,
   onLogout,
+  showBackToPortal = true,
   title,
   lead,
   statusLabel,
@@ -59,14 +61,18 @@ export function NoAccessView({
           </dl>
         </div>
         <div className="portal-state-actions">
-          <div className="portal-state-btn-row">
-            <button
-              type="button"
-              className="portal-state-btn secondary"
-              onClick={onBackToPortal}
-            >
-              Back To Portal Dashboard
-            </button>
+          <div
+            className={`portal-state-btn-row${showBackToPortal ? '' : ' logout-only'}`}
+          >
+            {showBackToPortal ? (
+              <button
+                type="button"
+                className="portal-state-btn secondary"
+                onClick={onBackToPortal}
+              >
+                Back To Portal Dashboard
+              </button>
+            ) : null}
             <button
               type="button"
               className="portal-state-btn secondary danger"

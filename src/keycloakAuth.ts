@@ -1,6 +1,7 @@
 import Keycloak from 'keycloak-js'
 import type { KeycloakTokenParsed } from 'keycloak-js'
-import { resolveFrappePostMessageOrigins } from './frappeSdk'
+import { broadcastCentralPortalLogout, waitForApplicationLogoutNavigation } from './portalLogoutSync'
+import { resolveFrappePostMessageOrigins, resolveFrappeProviderUrl } from './frappeSdk'
 
 type KeycloakInitResult = {
   authenticated: boolean
@@ -24,18 +25,18 @@ function canUsePkceS256() {
   return typeof window !== 'undefined' && Boolean(window.crypto?.subtle)
 }
 
-function truthyEnv(value: string | undefined) {
-  const v = value?.trim().toLowerCase()
-  return v === 'true' || v === '1' || v === 'yes'
-}
-
 /**
  * When true, Keycloak-js polls a hidden iframe so if the user ends the realm SSO session from
  * another app (without focusing this tab), this tab can still clear tokens. May be blocked by
  * strict third‑party cookie policies in some browsers — test before enabling in production.
  */
 function resolveKeycloakCheckLoginIframe() {
-  return truthyEnv(import.meta.env.VITE_KEYCLOAK_CHECK_LOGIN_IFRAME)
+  const raw = import.meta.env.VITE_KEYCLOAK_CHECK_LOGIN_IFRAME?.trim().toLowerCase()
+  if (raw === 'false' || raw === '0' || raw === 'no' || raw === 'off') {
+    return false
+  }
+  // Default on: detect realm SSO ended from another client/tab without focusing this portal tab.
+  return true
 }
 
 /** Polling interval in seconds for the session iframe (Keycloak default is 5). */
@@ -124,16 +125,43 @@ function resolveKeycloakRequestedScope() {
   return 'openid email profile location-scope'
 }
 
+/**
+ * Canonical portal URL after central / Keycloak logout. Frappe {@code sso_logout} and Keycloak
+ * {@code post_logout_redirect_uri} should both target this URL so linked apps end sessions and
+ * other portal tabs pick up {@code no_access=1}. Must match "Valid post logout redirect URIs" on
+ * the Keycloak client (include the query string if used).
+ */
+export function resolvePortalLogoutLandingUrl(): string {
+  const origin =
+    typeof window !== 'undefined' ? window.location.origin.replace(/\/+$/, '') : ''
+  const defaultUrl = `${origin}/applications?no_access=1`
+  const fromEnv = import.meta.env.VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI?.trim()
+  if (!fromEnv) {
+    return defaultUrl
+  }
+  try {
+    const u = new URL(fromEnv, origin || undefined)
+    if (u.pathname === '/' || u.pathname === '') {
+      u.pathname = '/applications'
+    }
+    if (!u.searchParams.get('no_access')) {
+      u.searchParams.set('no_access', '1')
+    }
+    u.hash = ''
+    return u.toString()
+  } catch {
+    return defaultUrl
+  }
+}
+
+/** Where Keycloak sends the browser after OIDC logout (same as {@link resolvePortalLogoutLandingUrl}). */
 function resolvePostLogoutRedirectUri() {
-  return (
-    import.meta.env.VITE_KEYCLOAK_POST_LOGOUT_REDIRECT_URI?.trim() ||
-    window.location.origin
-  )
+  return resolvePortalLogoutLandingUrl()
 }
 
 /**
- * Keycloak origin (no trailing slash). In dev, defaults to docker-compose port 8081
- * so "Login with Keycloak" hits http://localhost:8081/... even if VITE_KEYCLOAK_URL is unset.
+ * Keycloak origin (no trailing slash). In dev, defaults to http://localhost:8080 when
+ * VITE_KEYCLOAK_URL is unset (match your local Keycloak listen port).
  */
 function resolveKeycloakServerOrigin(): string | undefined {
   const explicit = normalizeEnvValue(import.meta.env.VITE_KEYCLOAK_URL)?.replace(/\/+$/, '')
@@ -156,6 +184,57 @@ function getKeycloakConfig(): KeycloakConfig | null {
   return { url, realm, clientId }
 }
 
+let keycloakMixedContentWarned = false
+
+function warnKeycloakMixedContentOnce() {
+  if (keycloakMixedContentWarned || typeof window === 'undefined') {
+    return
+  }
+  const cfg = getKeycloakConfig()
+  if (!cfg?.url) {
+    return
+  }
+  try {
+    const kcUrl = new URL(cfg.url)
+    if (window.location.protocol === 'https:' && kcUrl.protocol === 'http:') {
+      keycloakMixedContentWarned = true
+      console.warn(
+        '[kalyan-auth] Mixed content: this page is HTTPS but VITE_KEYCLOAK_URL is HTTP. ' +
+          'The browser blocks Keycloak token and iframe requests. Fix: open the portal as http://… ' +
+          '(match VITE_KEYCLOAK_REDIRECT_URI), or terminate TLS on Keycloak and set VITE_KEYCLOAK_URL to https://…',
+      )
+    }
+  } catch {
+    // ignore invalid VITE_KEYCLOAK_URL
+  }
+}
+
+/**
+ * When non-null, the current page protocol and {@code VITE_KEYCLOAK_URL} disagree (HTTPS page + HTTP Keycloak),
+ * so the browser will block Keycloak network calls until URLs are aligned.
+ */
+export function getKeycloakMixedContentWarning(): string | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  const cfg = getKeycloakConfig()
+  if (!cfg?.url) {
+    return null
+  }
+  try {
+    const kcUrl = new URL(cfg.url)
+    if (window.location.protocol === 'https:' && kcUrl.protocol === 'http:') {
+      return (
+        'This page is HTTPS but Keycloak is set to HTTP, so the browser blocks login and token requests (mixed content). ' +
+        'Either open the portal using http:// and matching redirect URIs in Keycloak, or serve Keycloak over HTTPS and set VITE_KEYCLOAK_URL to https://…'
+      )
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
 /** False when any of the Keycloak env vars are missing (portal cannot complete SSO). */
 export function isKeycloakConfigured(): boolean {
   return getKeycloakConfig() !== null
@@ -168,6 +247,50 @@ export function isKeycloakConfigured(): boolean {
  * so `window.opener` is set.
  */
 export const KALYAN_PORTAL_SSO_ENDED_MESSAGE = 'kalyan-portal:sso-ended' as const
+
+/**
+ * Synchronously dispatched before Keycloak logout and when this tab’s SSO session ends, so the
+ * portal can end linked application windows (Frappe sso_logout or OIDC end-session) in strict
+ * lockstep with central portal / Keycloak logout.
+ */
+export const KALYAN_PORTAL_TERMINATE_APP_SESSIONS_EVENT = 'kalyan-portal:terminate-app-sessions' as const
+
+function dispatchTerminateApplicationSessionsEvent() {
+  if (typeof window === 'undefined') {
+    return
+  }
+  window.dispatchEvent(new CustomEvent(KALYAN_PORTAL_TERMINATE_APP_SESSIONS_EVENT))
+}
+
+/**
+ * RP-initiated OIDC logout URL (Keycloak 17+). Use in auxiliary windows when no app-specific
+ * {@code sso_logout} URL exists so the browser clears that window’s Keycloak SSO context.
+ */
+export function resolveOpenIdConnectEndSessionUrl(options?: {
+  postLogoutRedirectUri?: string
+  idTokenHint?: string
+  /** OIDC client for the application tab; defaults to the portal client. */
+  clientId?: string
+}): string | null {
+  const cfg = getKeycloakConfig()
+  if (!cfg) {
+    return null
+  }
+  const u = new URL(
+    `${cfg.url}/realms/${encodeURIComponent(cfg.realm)}/protocol/openid-connect/logout`,
+  )
+  u.searchParams.set('client_id', options?.clientId?.trim() || cfg.clientId)
+  u.searchParams.set('post_logout_redirect_uri', options?.postLogoutRedirectUri || 'about:blank')
+  if (options?.idTokenHint) {
+    u.searchParams.set('id_token_hint', options.idTokenHint)
+  }
+  return u.toString()
+}
+
+/** Best-effort ID token for {@code id_token_hint} on auxiliary-window logout. */
+export function getKeycloakIdTokenForLogoutHint(): string | undefined {
+  return keycloak?.idToken || undefined
+}
 
 let keycloak: Keycloak | null = null
 
@@ -211,6 +334,8 @@ function startSsoProbeIntervalIfConfigured() {
 
 function emitKeycloakSessionLost() {
   clearSsoProbeInterval()
+  broadcastCentralPortalLogout()
+  dispatchTerminateApplicationSessionsEvent()
   for (const listener of sessionLostListeners) {
     try {
       listener()
@@ -314,6 +439,7 @@ export async function initializeKeycloak(): Promise<KeycloakInitResult> {
     return { authenticated: false }
   }
 
+  warnKeycloakMixedContentOnce()
   keycloak = new Keycloak(config)
   // Keep default `onLoad` (no silent `check-sso`) so first visit still shows "Login with Keycloak".
   // redirectUri must match the authorize request so the callback on /applications exchanges the code.
@@ -326,6 +452,14 @@ export async function initializeKeycloak(): Promise<KeycloakInitResult> {
 
 export function isKeycloakAuthenticated() {
   return Boolean(keycloak?.authenticated)
+}
+
+/**
+ * Clears tokens in this tab only (no Keycloak redirect). Fires {@code onAuthLogout} so session-lost
+ * listeners run — used when the user signed in but fails portal location rules.
+ */
+export function clearLocalKeycloakSession() {
+  keycloak?.clearToken()
 }
 
 export async function loginWithKeycloak() {
@@ -343,6 +477,7 @@ export async function loginWithKeycloak() {
     keycloak.authServerUrl !== config.url ||
     keycloak.realm !== config.realm
   ) {
+    warnKeycloakMixedContentOnce()
     keycloak = new Keycloak(config)
     await keycloak.init(resolveKeycloakInitOptions())
     keycloakInitialized = true
@@ -357,26 +492,36 @@ export async function loginWithKeycloak() {
   window.location.assign(href)
 }
 
-export async function isCentralPortalReachable() {
-  const config = getKeycloakConfig()
-  if (!config) {
-    return false
+/** Lightweight Frappe ping used before login to detect central portal (ERP) availability. */
+function resolveCentralPortalPingUrl() {
+  const frappeBase = resolveFrappeProviderUrl()
+  const path = '/api/method/ping'
+  if (frappeBase) {
+    return `${frappeBase.replace(/\/+$/, '')}${path}`
   }
+  if (typeof window !== 'undefined') {
+    return `${window.location.origin.replace(/\/+$/, '')}${path}`
+  }
+  return path
+}
 
+/**
+ * True when the central portal backend (Frappe) responds. Uses same-origin /api when
+ * VITE_FRAPPE_SAME_ORIGIN_API is enabled so HTTPS portal + HTTP Frappe still works via proxy.
+ * Keycloak availability is checked separately during login, not here.
+ */
+export async function isCentralPortalReachable() {
   const controller = new AbortController()
   const timeoutHandle = window.setTimeout(() => {
     controller.abort()
   }, resolvePortalAvailabilityTimeoutMs())
 
   try {
-    const response = await fetch(
-      `${config.url}/realms/${encodeURIComponent(config.realm)}/.well-known/openid-configuration`,
-      {
-        method: 'GET',
-        cache: 'no-store',
-        signal: controller.signal,
-      },
-    )
+    const response = await fetch(resolveCentralPortalPingUrl(), {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    })
     return response.ok
   } catch (error) {
     // Timeout should not force the maintenance screen; allow login flow to continue.
@@ -537,6 +682,9 @@ export async function logoutFromKeycloak() {
     return
   }
 
+  broadcastCentralPortalLogout()
+  dispatchTerminateApplicationSessionsEvent()
+  await waitForApplicationLogoutNavigation()
   await keycloak.logout({
     redirectUri: resolvePostLogoutRedirectUri(),
   })
@@ -696,18 +844,13 @@ function parseLocationsClaim(raw: unknown): string[] {
 }
 
 type TokenWithLocationClaims = KeycloakTokenParsed & {
+  /** User attribute {@code locations} via Keycloak protocol mapper — claim name must be {@code locations}. */
   locations?: unknown
-  location?: unknown
-  Locations?: unknown
   company?: unknown
   attributes?: {
-    locations?: unknown
-    location?: unknown
     company?: unknown
   }
   user_attributes?: {
-    locations?: unknown
-    location?: unknown
     company?: unknown
   }
 }
@@ -720,32 +863,6 @@ type ResourceAccessEntry = {
 
 type TokenWithResourceAccessClaims = KeycloakTokenParsed & {
   resource_access?: Record<string, ResourceAccessEntry>
-}
-
-function normalizeLocationKey(value: string) {
-  const cleaned = value.trim().toLowerCase().replace(/\s+/g, ' ')
-  if (!cleaned) {
-    return ''
-  }
-  if (cleaned === 'trissur' || cleaned === 'thrissur') {
-    return 'thrissur'
-  }
-  return cleaned
-}
-
-function appendUniqueLocations(locations: string[], extras: string[]) {
-  const keys = new Set(locations.map((location) => normalizeLocationKey(location)))
-  const out = [...locations]
-  for (const extra of extras) {
-    const trimmed = extra.trim()
-    const key = normalizeLocationKey(trimmed)
-    if (!key || keys.has(key)) {
-      continue
-    }
-    keys.add(key)
-    out.push(trimmed)
-  }
-  return out
 }
 
 function extractCompanyFromParsedToken(parsed: TokenWithLocationClaims | undefined) {
@@ -765,37 +882,16 @@ function extractCompanyFromParsedToken(parsed: TokenWithLocationClaims | undefin
   return ''
 }
 
-function extractLocationsFromParsedToken(parsed: TokenWithLocationClaims | undefined) {
+/**
+ * Reads only the {@code locations} JWT claim. Map user attribute {@code locations} in Keycloak with
+ * a User Attribute mapper; do not merge {@code company} into this claim if the portal must omit
+ * the default branch from lists.
+ */
+function extractMappedLocationsClaim(parsed: TokenWithLocationClaims | undefined): string[] {
   if (!parsed) {
     return []
   }
-  const candidates: unknown[] = [
-    parsed.locations,
-    parsed.location,
-    parsed.Locations,
-    parsed.company,
-    parsed.attributes?.locations,
-    parsed.attributes?.location,
-    parsed.attributes?.company,
-    parsed.user_attributes?.locations,
-    parsed.user_attributes?.location,
-    parsed.user_attributes?.company,
-  ]
-  const out = new Set<string>()
-  for (const candidate of candidates) {
-    for (const location of parseLocationsClaim(candidate)) {
-      out.add(location)
-    }
-  }
-  return [...out]
-}
-
-function parseLocationsFromUnknownObject(payload: unknown) {
-  if (typeof payload !== 'object' || payload === null) {
-    return []
-  }
-  const parsed = payload as TokenWithLocationClaims
-  return extractLocationsFromParsedToken(parsed)
+  return parseLocationsClaim(parsed.locations)
 }
 
 export type ClientAccessClaims = {
@@ -853,67 +949,162 @@ export function getCurrentUserCompany() {
   )
 }
 
-/** Locations from token claims mapped by Keycloak (access token first, then id token fallback). */
+/**
+ * User branch locations for the portal UI, from the access token {@code locations} claim only
+ * (then id token, then raw JWT decode). Keycloak must expose the user attribute {@code locations}
+ * under this claim; {@code company} is not included here.
+ */
 export function getCurrentUserLocations() {
   if (!keycloak) {
     return []
   }
-  const fromAccessToken = extractLocationsFromParsedToken(
+  const fromAccessToken = extractMappedLocationsClaim(
     keycloak.tokenParsed as TokenWithLocationClaims | undefined,
   )
   if (fromAccessToken.length > 0) {
-    return appendUniqueLocations(fromAccessToken, [getCurrentUserCompany()])
+    return fromAccessToken
   }
-  const fromIdTokenParsed = extractLocationsFromParsedToken(
+  const fromIdTokenParsed = extractMappedLocationsClaim(
     keycloak.idTokenParsed as TokenWithLocationClaims | undefined,
   )
   if (fromIdTokenParsed.length > 0) {
-    return appendUniqueLocations(fromIdTokenParsed, [getCurrentUserCompany()])
+    return fromIdTokenParsed
   }
-  // Final fallback: decode raw JWT payloads in case runtime parsed objects omit custom claims.
-  const fromAccessTokenRaw = extractLocationsFromParsedToken(
+  const fromAccessTokenRaw = extractMappedLocationsClaim(
     keycloak.token ? (decodeJwt(keycloak.token) as TokenWithLocationClaims) : undefined,
   )
   if (fromAccessTokenRaw.length > 0) {
-    return appendUniqueLocations(fromAccessTokenRaw, [getCurrentUserCompany()])
+    return fromAccessTokenRaw
   }
-  const fromIdTokenRaw = extractLocationsFromParsedToken(
+  return extractMappedLocationsClaim(
     keycloak.idToken ? (decodeJwt(keycloak.idToken) as TokenWithLocationClaims) : undefined,
   )
-  return appendUniqueLocations(fromIdTokenRaw, [getCurrentUserCompany()])
 }
 
-/** Fetches locations from OIDC userinfo endpoint (runtime fallback when token omits custom claims). */
-export async function fetchCurrentUserLocationsFromUserInfo() {
-  const config = getKeycloakConfig()
-  const token = keycloak?.token
-  if (!config || !token) {
-    return []
+/**
+ * Aligns with Keycloak {@code LocationAttributeSupport.normalizeLocationKey} so the portal matches
+ * the realm “company must appear in locations” rule when reading JWT claims.
+ */
+export function normalizePortalLocationKey(value: string): string {
+  const cleaned = value.trim().toLowerCase().replace(/\s+/g, ' ')
+  if (!cleaned) {
+    return ''
   }
-  try {
-    const response = await fetch(
-      `${config.url}/realms/${encodeURIComponent(config.realm)}/protocol/openid-connect/userinfo`,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
-      },
-    )
-    if (!response.ok) {
-      return []
+  if (cleaned === 'trissur' || cleaned === 'thrissur') {
+    return 'thrissur'
+  }
+  return cleaned
+}
+
+/**
+ * {@code true} when the default branch ({@code company} claim) is included in the {@code locations}
+ * claim. If either is missing or the set is empty, returns {@code false} so the SPA can show the
+ * location denial screen without rendering applications.
+ */
+export function isDefaultCompanyInUserLocations(): boolean {
+  const company = getCurrentUserCompany()
+  const locations = getCurrentUserLocations()
+  if (!company || locations.length === 0) {
+    return false
+  }
+  const companyKey = normalizePortalLocationKey(company)
+  if (!companyKey) {
+    return false
+  }
+  return locations.some((loc) => normalizePortalLocationKey(loc) === companyKey)
+}
+
+/** Same intersection rule as Keycloak {@code LocationAttributeSupport.locationSetsIntersect}. */
+export function portalLocationSetsIntersect(
+  userLocations: string[],
+  appLocations: string[],
+): boolean {
+  const userKeys = new Set<string>()
+  for (const u of userLocations) {
+    const k = normalizePortalLocationKey(u)
+    if (k) {
+      userKeys.add(k)
     }
-    const payload = (await response.json()) as unknown
-    const locations = parseLocationsFromUnknownObject(payload)
-    const company =
-      typeof payload === 'object' && payload !== null
-        ? extractCompanyFromParsedToken(payload as TokenWithLocationClaims)
-        : ''
-    return appendUniqueLocations(locations, [company])
-  } catch {
+  }
+  for (const a of appLocations) {
+    const k = normalizePortalLocationKey(a)
+    if (k && userKeys.has(k)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Parses {@code kalyan-required-roles}-style specs (comma / semicolon / pipe). Must stay aligned
+ * with Keycloak client attribute {@code kalyan-required-roles} when using env-based portal filters.
+ */
+export function splitKalyanRoleSpecs(raw: string | undefined): string[] {
+  if (!raw?.trim()) {
     return []
   }
+  return raw
+    .split(/[,;|]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/**
+ * Matches one role spec like Keycloak {@code ClientApplicationAccessAuthenticator}: either
+ * {@code realmRole}, or {@code clientId:roleName} (role name is everything after the first colon).
+ * Role names are compared case-sensitively to token claims.
+ */
+export function userSatisfiesKalyanRoleSpec(spec: string): boolean {
+  if (!keycloak?.tokenParsed) {
+    return false
+  }
+  const parsed = keycloak.tokenParsed as KeycloakTokenParsed & {
+    realm_access?: { roles?: string[] }
+    resource_access?: Record<string, { roles?: string[] }>
+  }
+  const colon = spec.indexOf(':')
+  if (colon > 0) {
+    const clientId = spec.slice(0, colon).trim()
+    const roleName = spec.slice(colon + 1).trim()
+    if (!clientId || !roleName) {
+      return false
+    }
+    const roles = parsed.resource_access?.[clientId]?.roles || []
+    return roles.some((r) => r === roleName)
+  }
+  const roleName = spec.trim()
+  if (!roleName) {
+    return false
+  }
+  if (parsed.realm_access?.roles?.includes(roleName)) {
+    return true
+  }
+  for (const cid of Object.keys(parsed.resource_access || {})) {
+    const roles = parsed.resource_access?.[cid]?.roles || []
+    if (roles.includes(roleName)) {
+      return true
+    }
+  }
+  return false
+}
+
+export function userSatisfiesAnyKalyanRoleSpec(specs: string[]): boolean {
+  if (specs.length === 0) {
+    return true
+  }
+  return specs.some((spec) => userSatisfiesKalyanRoleSpec(spec))
+}
+
+/** Normalized location keys from the current user {@code locations} claim (for row-level UI). */
+export function getCurrentUserLocationKeys(): Set<string> {
+  const keys = new Set<string>()
+  for (const loc of getCurrentUserLocations()) {
+    const k = normalizePortalLocationKey(loc)
+    if (k) {
+      keys.add(k)
+    }
+  }
+  return keys
 }
 
 function normalizeRoles(value: string | undefined) {

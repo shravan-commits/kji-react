@@ -50,10 +50,28 @@ export default defineConfig(({ mode }) => {
           }
         : {}),
     },
+    // So `vite preview` can use same-origin /api proxying like dev (when Frappe URL is empty / same-origin mode).
+    preview: {
+      host: '0.0.0.0',
+      port: 4173,
+      strictPort: false,
+      proxy: proxyOptions,
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
       },
+    },
+    // Lower peak RAM during `vite build` (helps constrained Windows / CI agents).
+    build: {
+      sourcemap: false,
+      reportCompressedSize: false,
+      rollupOptions: {
+        maxParallelFileOps: 2,
+      },
+    },
+    esbuild: {
+      legalComments: 'none',
     },
   }
 })

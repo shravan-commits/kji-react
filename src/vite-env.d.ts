@@ -10,6 +10,8 @@ interface ImportMetaEnv {
   readonly VITE_DEV_SSL_DOMAINS?: string
   readonly VITE_FRAPPE_URL?: string
   readonly VITE_FRAPPE_BASE_URL?: string
+  /** When true/1/yes, Frappe API base URL is empty so requests use the portal origin; proxy /api to Frappe. */
+  readonly VITE_FRAPPE_SAME_ORIGIN_API?: string
   /** Comma-separated extra browser origins allowed to postMessage this portal on ERP logout. */
   readonly VITE_FRAPPE_LOGOUT_MESSAGE_ORIGINS?: string
   readonly VITE_FRAPPE_TOKEN?: string
@@ -48,6 +50,8 @@ interface ImportMetaEnv {
   readonly VITE_APP_FINANCE_URL?: string
   readonly VITE_APP_FINANCE_REQUIRED_ROLES?: string
   readonly VITE_USER_LIST_REQUIRED_ROLES?: string
+  /** Optional status filter for get_central_portal_users (e.g. Active, Inactive). */
+  readonly VITE_CENTRAL_PORTAL_USERS_STATUS?: string
 }
 
 interface ImportMeta {

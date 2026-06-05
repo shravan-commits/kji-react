@@ -83,21 +83,15 @@ type FrappeTokenParams = {
 }
 
 /**
- * Optional token auth for Frappe SDK calls.
- * Useful when app auth is handled by Keycloak and no Frappe session cookie exists.
+ * Optional static token auth (VITE_FRAPPE_TOKEN env var).
+ * When unset, App.tsx falls back to the live Keycloak JWT.
  */
 export function resolveFrappeTokenParams(): FrappeTokenParams | undefined {
   const rawToken = import.meta.env.VITE_FRAPPE_TOKEN?.trim()
-  if (!rawToken) {
-    return undefined
-  }
+  if (!rawToken) return undefined
   const rawType = import.meta.env.VITE_FRAPPE_TOKEN_TYPE?.trim().toLowerCase()
   const type: 'Bearer' | 'token' = rawType === 'token' ? 'token' : 'Bearer'
-  return {
-    useToken: true,
-    token: () => rawToken,
-    type,
-  }
+  return { useToken: true, token: () => rawToken, type }
 }
 
 /** True when the SDK should open a Socket.IO connection (site name + port in dev). */

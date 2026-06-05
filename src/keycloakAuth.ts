@@ -294,6 +294,41 @@ export function getKeycloakIdTokenForLogoutHint(): string | undefined {
 
 let keycloak: Keycloak | null = null
 
+const CHECK_EMPLOYMENT_STATUS_METHOD = ‘keycloak_integration.api.check_employment_status’
+
+let employmentBlockedReason: string | null = null
+
+export function consumeEmploymentBlockedReason(): string | null {
+  const reason = employmentBlockedReason
+  employmentBlockedReason = null
+  return reason
+}
+
+async function checkEmploymentStatusAfterRefresh(): Promise<void> {
+  const kc = keycloak
+  if (!kc?.authenticated || !kc.token) return
+  const token = kc.token
+  const base = resolveFrappeProviderUrl()
+  try {
+    const response = await fetch(`${base}/api/method/${CHECK_EMPLOYMENT_STATUS_METHOD}`, {
+      method: ‘POST’,
+      credentials: ‘include’,
+      headers: { ‘Content-Type’: ‘application/json’ },
+      body: JSON.stringify({ access_token: token }),
+    })
+    if (response.status === 401) return
+    if (!response.ok) return
+    const data = (await response.json()) as { message?: { status?: string } }
+    const msg = data?.message
+    if (msg?.status === ‘blocked’) {
+      employmentBlockedReason = ‘Your account is Inactive’
+      kc.clearToken()
+    }
+  } catch {
+    // Network error - server-side sweep will handle it
+  }
+}
+
 /** Notified when Keycloak clears this tab’s session (logout elsewhere, refresh failure, etc.). */
 const sessionLostListeners = new Set<() => void>()
 let wiredKeycloakInstance: Keycloak | null = null
@@ -402,6 +437,12 @@ function wireKeycloakSessionSync(kc: Keycloak) {
     kc.onAuthLogout = function onAuthLogoutHandler() {
       previousLogout?.call(kc)
       emitKeycloakSessionLost()
+    }
+
+    const previousRefreshSuccess = kc.onAuthRefreshSuccess
+    kc.onAuthRefreshSuccess = function onAuthRefreshSuccessHandler() {
+      previousRefreshSuccess?.call(kc)
+      void checkEmploymentStatusAfterRefresh()
     }
   }
 

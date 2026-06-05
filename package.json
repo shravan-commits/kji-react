@@ -8,6 +8,7 @@
     "build": "cross-env NODE_OPTIONS=--max-old-space-size=4096 node ./node_modules/typescript/lib/tsc.js && cross-env NODE_OPTIONS=--max-old-space-size=4096 node ./node_modules/vite/bin/vite.js build",
     "build:lite": "cross-env NODE_OPTIONS=--max-old-space-size=4096 node ./node_modules/typescript/lib/tsc.js && cross-env NODE_OPTIONS=--max-old-space-size=4096 node ./node_modules/vite/bin/vite.js build --minify false",
     "preview": "cross-env NODE_OPTIONS=--max-http-header-size=131072 vite preview",
+    "serve:dist": "cross-env NODE_OPTIONS=--max-http-header-size=131072 vite preview",
     "fix-permissions": "node scripts/fix-native-bin-perms.mjs",
     "postinstall": "node scripts/fix-native-bin-perms.mjs"
   },

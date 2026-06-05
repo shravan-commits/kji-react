@@ -155,17 +155,10 @@ export function resolveTrackedWindowLogoutUrl(launchUrl: string): string | null 
   return null
 }
 
-/** All Frappe (or app) site origins from env — used to end sessions in tabs not tracked by the portal. */
-export function collectConfiguredApplicationSiteOrigins(): Set<string> {
+/** All Frappe (or app) site origins — used to end sessions in tabs not tracked by the portal. */
+export function collectConfiguredApplicationSiteOrigins(launchUrls?: string[]): Set<string> {
   const out = new Set<string>()
-  const env = import.meta.env
-  const launchUrls = [
-    env.VITE_APP_HR_URL,
-    env.VITE_APP_WAREHOUSE_URL,
-    env.VITE_APP_SALES_URL,
-    env.VITE_APP_FINANCE_URL,
-  ]
-  for (const raw of launchUrls) {
+  for (const raw of launchUrls ?? []) {
     const trimmed = raw?.trim()
     if (!trimmed) {
       continue
@@ -237,37 +230,32 @@ export function fanOutBestEffortApplicationLogouts(origins?: Iterable<string>) {
 export type TrackedApplicationWindow = {
   window: Window
   launchUrl: string
+  frappeSiteUrl?: string
 }
 
 /** Navigate tracked ERP/Keycloak app tabs to logout; fan out to all configured app origins. */
-export function terminateApplicationSessions(tracked: TrackedApplicationWindow[]) {
+export function terminateApplicationSessions(tracked: TrackedApplicationWindow[], extraLaunchUrls?: string[]) {
   const landingUrl = resolvePortalLogoutLandingUrl()
-  const oidcFallback =
-    resolveOpenIdConnectEndSessionUrl({
-      postLogoutRedirectUri: landingUrl,
-      idTokenHint: getKeycloakIdTokenForLogoutHint(),
-    }) ?? null
 
   for (const entry of tracked) {
     if (entry.window.closed) {
       continue
     }
-    const url = resolveTrackedWindowLogoutUrl(entry.launchUrl) || oidcFallback
-    if (!url) {
-      continue
-    }
+    // Navigate tracked app tabs directly to the portal landing URL so the user lands back on the
+    // portal instead of hitting the Frappe sso_logout endpoint (which may 417 if the Keycloak
+    // session is already ending). Server-side Frappe sessions are ended by the fan-out iframes below.
     try {
-      entry.window.location.replace(url)
+      entry.window.location.replace(landingUrl)
     } catch {
       try {
-        entry.window.location.assign(url)
+        entry.window.location.assign(landingUrl)
       } catch {
         // Ignore per-window navigation errors; central logout still proceeds.
       }
     }
   }
 
-  const allOrigins = collectConfiguredApplicationSiteOrigins()
+  const allOrigins = collectConfiguredApplicationSiteOrigins(extraLaunchUrls)
   fanOutBestEffortApplicationLogouts(allOrigins)
   window.setTimeout(() => {
     fanOutBestEffortApplicationLogouts(allOrigins)

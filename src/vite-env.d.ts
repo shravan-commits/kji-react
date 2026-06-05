@@ -41,14 +41,6 @@ interface ImportMetaEnv {
   readonly VITE_KEYCLOAK_CHECK_LOGIN_IFRAME_INTERVAL_SEC?: string
   /** Periodic forced token refresh in ms (min 15000); 0/unset = off. */
   readonly VITE_KEYCLOAK_SSO_PROBE_INTERVAL_MS?: string
-  readonly VITE_APP_HR_URL?: string
-  readonly VITE_APP_HR_REQUIRED_ROLES?: string
-  readonly VITE_APP_WAREHOUSE_URL?: string
-  readonly VITE_APP_WAREHOUSE_REQUIRED_ROLES?: string
-  readonly VITE_APP_SALES_URL?: string
-  readonly VITE_APP_SALES_REQUIRED_ROLES?: string
-  readonly VITE_APP_FINANCE_URL?: string
-  readonly VITE_APP_FINANCE_REQUIRED_ROLES?: string
   readonly VITE_USER_LIST_REQUIRED_ROLES?: string
   /** Optional status filter for get_central_portal_users (e.g. Active, Inactive). */
   readonly VITE_CENTRAL_PORTAL_USERS_STATUS?: string

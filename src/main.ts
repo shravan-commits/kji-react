@@ -1,8 +1,12 @@
+import axios from 'axios'
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import { initializeKeycloak, installFrappeAppLogoutPostMessageListener } from './keycloakAuth'
+
+// Send session cookies with every Frappe API call so Frappe sees the logged-in user, not Guest.
+axios.defaults.withCredentials = true
 
 async function bootstrap() {
   try {

@@ -11,17 +11,37 @@ function isDevHttpsDisabled(value: string | undefined): boolean {
   return v === '0' || v === 'false' || v === 'no'
 }
 
+/** cert.pem + key.pem in project root, or VITE_DEV_SSL_CERT / VITE_DEV_SSL_KEY. */
+function resolveCustomHttps(
+  env: Record<string, string>,
+  rootDir: string,
+): { cert: Buffer; key: Buffer } | undefined {
+  let certPath = env.VITE_DEV_SSL_CERT?.trim()
+  let keyPath = env.VITE_DEV_SSL_KEY?.trim()
+  if (!certPath || !keyPath) {
+    const defaultCert = path.resolve(rootDir, 'cert.pem')
+    const defaultKey = path.resolve(rootDir, 'key.pem')
+    if (fs.existsSync(defaultCert) && fs.existsSync(defaultKey)) {
+      certPath = defaultCert
+      keyPath = defaultKey
+    }
+  }
+  if (!certPath || !keyPath || !fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+    return undefined
+  }
+  return {
+    cert: fs.readFileSync(certPath),
+    key: fs.readFileSync(keyPath),
+  }
+}
+
 // Dev server proxies Frappe routes so the SPA and API share origin and session cookies.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const devHttpsDisabled = isDevHttpsDisabled(env.VITE_DEV_HTTPS)
 
-  const certPath = env.VITE_DEV_SSL_CERT?.trim()
-  const keyPath = env.VITE_DEV_SSL_KEY?.trim()
-  const customSsl =
-    Boolean(certPath && keyPath) &&
-    fs.existsSync(certPath!) &&
-    fs.existsSync(keyPath!)
+  const customHttps = resolveCustomHttps(env, process.cwd())
+  const customSsl = Boolean(customHttps)
 
   const sslDomains = (env.VITE_DEV_SSL_DOMAINS?.split(',') ?? [])
     .map((s) => s.trim())
@@ -41,21 +61,18 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       proxy: proxyOptions,
-      ...(customSsl
-        ? {
-            https: {
-              cert: fs.readFileSync(certPath!),
-              key: fs.readFileSync(keyPath!),
-            },
-          }
-        : {}),
+      ...(customHttps ? { https: customHttps } : {}),
     },
-    // So `vite preview` can use same-origin /api proxying like dev (when Frappe URL is empty / same-origin mode).
+    // `npm run serve:dist` — static dist + /api proxy (replaces `npx serve -s`, which returns index.html for /api).
+    // Exclude /assets from preview proxy: built JS/CSS lives in dist/assets/ and must be served locally.
     preview: {
       host: '0.0.0.0',
-      port: 4173,
-      strictPort: false,
-      proxy: proxyOptions,
+      port: 5173,
+      strictPort: true,
+      proxy: Object.fromEntries(
+        Object.entries(proxyOptions).filter(([k]) => k !== '/assets'),
+      ),
+      ...(customHttps ? { https: customHttps } : {}),
     },
     resolve: {
       alias: {
